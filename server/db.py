@@ -107,6 +107,8 @@ def _migrate():
         _exec("ALTER TABLE agents ADD COLUMN extra_dirs TEXT NOT NULL DEFAULT ''")
     if "skills" not in cols:
         _exec("ALTER TABLE agents ADD COLUMN skills TEXT NOT NULL DEFAULT ''")
+    if "ask_perm" not in cols:
+        _exec("ALTER TABLE agents ADD COLUMN ask_perm INTEGER NOT NULL DEFAULT 0")
 
 
 def _rows(sql, args=()):

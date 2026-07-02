@@ -90,6 +90,14 @@ TOOLS = [
         "description": "看看系统里有哪些 agent 同事（名字、状态、备注）。",
         "inputSchema": {"type": "object", "properties": {}},
     },
+    {
+        # 系统内部用：开了"越权询问"的 agent，CLI 遇到权限不足的操作时
+        # 会自动调这个工具（--permission-prompt-tool），阻塞等用户点允许/拒绝。
+        # agent 自己不要主动调它。
+        "name": "ask_permission",
+        "description": "（系统内部用）向用户请求越权操作的授权，请勿主动调用。",
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": True},
+    },
 ]
 
 
@@ -100,7 +108,9 @@ def call_hub(tool, args):
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    # ask_permission 要一直等到用户点按钮，其余工具 30 秒足够
+    timeout = 660 if tool == "ask_permission" else 30
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
         out = json.loads(resp.read().decode("utf-8"))
     if not out.get("ok"):
         raise RuntimeError(out.get("error", "unknown error"))

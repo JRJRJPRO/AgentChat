@@ -166,6 +166,9 @@ class Hub:
             d = d.strip()
             if d:
                 cmd += ["--add-dir", d]
+        if agent.get("ask_perm"):
+            # 越权操作不再直接拒绝，而是通过 MCP 工具弹到界面上等用户点允许/拒绝
+            cmd += ["--permission-prompt-tool", "mcp__chat__ask_permission"]
         cmd += ["--session-id", agent["session_id"]] if first else ["--resume", agent["session_id"]]
 
         os.makedirs(agent["cwd"], exist_ok=True)
@@ -174,6 +177,7 @@ class Hub:
         for k in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT"):
             env.pop(k, None)
         env["PYTHONIOENCODING"] = "utf-8"
+        env["MCP_TOOL_TIMEOUT"] = "660000"  # ask_permission 要等用户，别被默认超时掐断
         if self.git_bash:
             env["CLAUDE_CODE_GIT_BASH_PATH"] = self.git_bash
 

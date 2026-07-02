@@ -12,7 +12,7 @@ from fastapi import FastAPI, Body, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import config, db, prompts, skills
+from . import config, db, prompts, skills, usage
 from .hub import Hub
 
 
@@ -62,7 +62,7 @@ def agent_view(a):
         "permission": a["permission"], "memo": a["memo"], "status": a["status"],
         "wake_count": a["wake_count"], "last_wake_at": a["last_wake_at"],
         "extra_dirs": a.get("extra_dirs") or "", "skills": [s for s in (a.get("skills") or "").split(",") if s],
-        "run": hub.run_state(a["id"]),
+        "ask_perm": bool(a.get("ask_perm")), "run": hub.run_state(a["id"]),
     }
 
 
@@ -104,6 +104,7 @@ async def api_create_agent(payload: dict = Body(...)):
     perm = payload.get("permission") if payload.get("permission") in config.PERMISSION_PRESETS else config.DEFAULT_PERMISSION
     os.makedirs(cwd, exist_ok=True)
     a = db.create_agent(name, cwd, model, perm, payload.get("memo") or "")
+    db.update_agent(a["id"], ask_perm=1 if payload.get("ask_perm") else 0)
     if payload.get("extra_dirs") is not None:
         db.update_agent(a["id"], extra_dirs=_clean_dirs(payload["extra_dirs"]))
     if payload.get("skills"):
@@ -133,6 +134,8 @@ async def api_update_agent(aid: int, payload: dict = Body(...)):
         kw["cwd"] = payload["cwd"]
     if "extra_dirs" in payload:
         kw["extra_dirs"] = _clean_dirs(payload["extra_dirs"])
+    if "ask_perm" in payload:
+        kw["ask_perm"] = 1 if payload["ask_perm"] else 0
     if "skills" in payload:
         applied = skills.sync_agent_skills(a, payload["skills"] or [])
         kw["skills"] = ",".join(applied)
@@ -191,6 +194,63 @@ async def api_open_folder(payload: dict = Body(...)):
 @app.get("/api/stats")
 async def api_stats(hours: float = 5):
     return db.usage_stats(time.time() - hours * 3600)
+
+
+@app.get("/api/usage")
+def api_usage():  # 同步 def：订阅接口是阻塞网络调用，FastAPI 会丢线程池跑
+    return {
+        "subscription": usage.subscription_usage(),
+        "local": db.usage_stats(time.time() - 5 * 3600),
+    }
+
+
+# ---------------- 越权授权流 ----------------
+# agent 开了"越权询问"后，claude CLI 遇到权限不足的操作会调 mcp__chat__ask_permission，
+# 请求挂在这里等用户在界面上点允许/拒绝（超时按拒绝）。
+
+_perm_reqs = {}   # id -> {"future": asyncio.Future, "info": {...}}
+_perm_seq = 0
+
+
+async def _handle_ask_permission(agent, args):
+    import asyncio
+    global _perm_seq
+    _perm_seq += 1
+    rid = _perm_seq
+    tool_name = args.get("tool_name") or "?"
+    tool_input = args.get("input") or {}
+    info = {
+        "id": rid, "agent_id": agent["id"], "agent": agent["name"],
+        "tool": tool_name,
+        "input_summary": json.dumps(tool_input, ensure_ascii=False)[:400],
+    }
+    fut = asyncio.get_event_loop().create_future()
+    _perm_reqs[rid] = {"future": fut, "info": info}
+    await ws_manager.broadcast({"t": "perm", "req": info})
+    try:
+        allow = await asyncio.wait_for(fut, timeout=config.PERMISSION_ASK_TIMEOUT)
+    except asyncio.TimeoutError:
+        allow = False
+    finally:
+        _perm_reqs.pop(rid, None)
+        await ws_manager.broadcast({"t": "perm_done", "id": rid})
+    if allow:
+        return json.dumps({"behavior": "allow", "updatedInput": tool_input})
+    return json.dumps({"behavior": "deny",
+                       "message": f"{config.USER_NAME} 拒绝了这次操作（或未在时限内响应）。换个不需要该权限的做法，或在聊天里说明你为什么需要它。"})
+
+
+@app.get("/api/permissions")
+async def api_permissions():
+    return {"pending": [r["info"] for r in _perm_reqs.values()]}
+
+
+@app.post("/api/permissions/{rid}/answer")
+async def api_perm_answer(rid: int, payload: dict = Body(...)):
+    r = _perm_reqs.get(rid)
+    if r and not r["future"].done():
+        r["future"].set_result(bool(payload.get("allow")))
+    return {"ok": True}
 
 
 @app.post("/api/shutdown")
@@ -454,8 +514,13 @@ async def internal_tool(payload: dict = Body(...)):
     agent = db.get_agent_by_token(payload.get("token") or "")
     if not agent:
         return JSONResponse({"ok": False, "error": "无效的 agent token"})
+    tool = payload.get("tool")
+    if tool == "ask_permission":
+        # 授权应答必须是纯 JSON，不能混入捎带消息
+        result = await _handle_ask_permission(agent, payload.get("args") or {})
+        return JSONResponse({"ok": True, "result": result})
     try:
-        result = await _tool_dispatch(agent, payload.get("tool"), payload.get("args") or {})
+        result = await _tool_dispatch(agent, tool, payload.get("args") or {})
         extra = _piggyback(agent)
         if extra:
             if not isinstance(result, str):

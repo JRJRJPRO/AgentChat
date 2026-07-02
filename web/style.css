@@ -198,15 +198,34 @@ body {
   content: ""; flex: 1; height: 1px; background: var(--border);
 }
 
-.stats-card {
-  background: var(--panel2); border: 1px solid var(--border); border-radius: 12px;
-  padding: 12px; margin: 6px 2px 10px;
+/* 设置弹窗里的用量/技能库区块 */
+.usage-box { font-size: 13px; margin-bottom: 6px; line-height: 1.8; color: var(--text); }
+.usage-box .muted { color: var(--muted); font-size: 12px; }
+.u-row { display: flex; align-items: center; gap: 10px; margin: 5px 0; }
+.u-label { width: 130px; min-width: 130px; color: var(--muted); font-size: 12px; }
+.u-bar { flex: 1; height: 8px; background: var(--panel2); border: 1px solid var(--border); border-radius: 4px; overflow: hidden; }
+.u-fill { height: 100%; background: var(--accent); border-radius: 4px; }
+.u-fill.warn { background: var(--yellow); }
+.u-fill.danger { background: var(--red); }
+.u-pct { width: 44px; text-align: right; font-weight: 600; font-size: 12px; }
+.u-reset { width: 90px; color: var(--muted); font-size: 11px; text-align: right; }
+
+/* 越权授权请求（右下角浮动卡片） */
+#permPanel { position: fixed; right: 20px; bottom: 20px; z-index: 300; display: flex; flex-direction: column; gap: 10px; max-width: 380px; }
+.perm-card {
+  background: var(--panel); border: 1px solid var(--yellow); border-radius: 12px;
+  padding: 14px; box-shadow: 0 10px 30px rgba(0,0,0,.5); font-size: 13px;
 }
-.stats-card .s-title { color: var(--muted); font-size: 11px; margin-bottom: 8px; font-weight: 600; }
-.stats-card .s-row { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 13px; }
-.stats-card .s-num { font-weight: 700; }
-.stats-card .s-agents { color: var(--muted); font-size: 11px; margin-top: 8px; line-height: 1.7; }
-.lib-line { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 12px; color: var(--muted); flex-wrap: wrap; }
+.perm-card .p-title { font-weight: 700; margin-bottom: 6px; }
+.perm-card .p-tool { color: var(--yellow); font-family: Consolas, monospace; font-size: 12px; }
+.perm-card .p-input {
+  color: var(--muted); font-size: 11px; font-family: Consolas, monospace;
+  background: var(--panel2); border-radius: 6px; padding: 6px 8px; margin: 8px 0;
+  max-height: 90px; overflow-y: auto; word-break: break-all; white-space: pre-wrap;
+}
+.perm-card .p-btns { display: flex; gap: 8px; justify-content: flex-end; }
+.perm-card .allow { background: var(--green); color: #fff; border: none; border-radius: 7px; padding: 6px 16px; cursor: pointer; font-weight: 600; }
+.perm-card .deny { background: transparent; color: var(--red); border: 1px solid var(--red); border-radius: 7px; padding: 6px 16px; cursor: pointer; }
 
 #typing { padding: 4px 20px 8px; color: var(--muted); font-size: 12px; font-style: italic; }
 

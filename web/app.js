@@ -170,51 +170,11 @@ function renderConvList(root, convs, emptyKey, isDiscover) {
   }
 }
 
-function statsCardHtml() {
-  const st = S.stats, sk = S.skillsInfo;
-  let inner;
-  if (!st || !st.total.wakes) {
-    inner = `<div class="s-row" style="color:var(--muted)">${esc(t("stats_empty"))}</div>`;
-  } else {
-    const T = st.total;
-    inner =
-      `<div class="s-row">` +
-      `<span><span class="s-num">${T.wakes}</span> ${esc(t("stats_wakes"))}</span>` +
-      `<span>${esc(t("stats_out"))} <span class="s-num">${fmtTok(T.output_tokens)}</span></span>` +
-      `<span>${esc(t("stats_in"))} <span class="s-num">${fmtTok(T.input_tokens)}</span></span>` +
-      `<span>${esc(t("stats_cache"))} <span class="s-num">${fmtTok(T.cache_read)}</span></span>` +
-      `<span>${esc(t("stats_cost"))} <span class="s-num">$${T.cost_usd.toFixed(2)}</span></span></div>`;
-    const per = st.per_agent.map((p) => `${esc(p.name)} ×${p.wakes} ($${p.cost_usd.toFixed(2)})`).join(" · ");
-    if (per) inner += `<div class="s-agents">${per}</div>`;
-  }
-  let lib = "";
-  if (sk) {
-    lib = `<div class="lib-line">${esc(t("skills_lib"))}: ${sk.library.length} · ` +
-      `${sk.global.length}${esc(t("skills_global_hint"))} ` +
-      `<button class="mini-btn" data-open="lib">${esc(t("open_folder"))} skills/</button>` +
-      `<button class="mini-btn" data-open="global">${esc(t("open_folder"))} ~/.claude/skills</button></div>`;
-  }
-  return `<div class="stats-card"><div class="s-title">${esc(t("stats_title"))}</div>${inner}${lib}</div>`;
-}
-
-async function loadStatsAndSkills() {
-  const [st, sk] = await Promise.all([api("/api/stats?hours=5"), api("/api/skills")]);
-  S.stats = st;
-  S.skillsInfo = sk;
-  renderAgentList();
-}
-
 function renderAgentList() {
   const root = $("listAgents");
   root.innerHTML = "";
-  root.insertAdjacentHTML("beforeend", statsCardHtml());
-  root.querySelectorAll("[data-open]").forEach((b) => {
-    b.onclick = () => api("/api/open_folder", {
-      path: b.dataset.open === "lib" ? S.skillsInfo.library_dir : S.skillsInfo.global_dir,
-    }).catch((e) => toast(e.message, 1));
-  });
   if (!S.agents.length) {
-    root.insertAdjacentHTML("beforeend", `<div class="list-empty">${esc(t("empty_agents"))}</div>`);
+    root.innerHTML = `<div class="list-empty">${esc(t("empty_agents"))}</div>`;
     return;
   }
   for (const a of S.agents) {
@@ -473,6 +433,11 @@ function connectWS() {
         S.cur.chain.paused = d.paused;
         renderBanner();
       }
+    } else if (d.t === "perm") {
+      addPermCard(d.req);
+    } else if (d.t === "perm_done") {
+      const card = $("perm" + d.id);
+      if (card) card.remove();
     } else if (d.t === "convs_changed") {
       refreshLists();
     } else if (d.t === "read") {
@@ -481,7 +446,7 @@ function connectWS() {
     }
   };
   ws.onclose = () => setTimeout(connectWS, 2000);
-  ws.onopen = () => refreshLists();
+  ws.onopen = () => { refreshLists(); loadPendingPerms(); };
   setInterval(() => { if (ws.readyState === 1) ws.send("ping"); }, 30000);
 }
 
@@ -562,6 +527,7 @@ function openNewAgent() {
   fillSelect($("agModel"), S.models, S.defaults.model);
   fillSelect($("agPerm"), S.permissions, S.defaults.permission);
   $("agName").value = ""; $("agCwd").value = ""; $("agMemo").value = ""; $("agDirs").value = "";
+  $("agAsk").checked = false;
   updatePermHint();
   renderSkillChecks("agSkills", []);
   openModal("modalAgent");
@@ -581,6 +547,7 @@ async function createAgent() {
       cwd: $("agCwd").value,
       memo: $("agMemo").value,
       extra_dirs: $("agDirs").value,
+      ask_perm: $("agAsk").checked,
       skills: checkedSkills("agSkills"),
     });
     closeModal();
@@ -599,6 +566,7 @@ function openAgentEdit(a) {
   fillSelect($("aePerm"), S.permissions, a.permission);
   $("aeMemo").value = a.memo || "";
   $("aeDirs").value = a.extra_dirs || "";
+  $("aeAsk").checked = !!a.ask_perm;
   $("aePermHint").textContent = t("perm_" + a.permission);
   $("aeInfo").textContent = `${t("f_cwd")}: ${a.cwd}`;
   renderSkillChecks("aeSkills", a.skills || []);
@@ -612,6 +580,7 @@ async function saveAgentEdit() {
       permission: $("aePerm").value,
       memo: $("aeMemo").value,
       extra_dirs: $("aeDirs").value,
+      ask_perm: $("aeAsk").checked,
       skills: checkedSkills("aeSkills"),
     });
     closeModal();
@@ -702,7 +671,100 @@ function setTab(tab) {
   if (tab === "discover") {
     api("/api/convs?scope=all").then((d) => { S.discover = d.convs; renderLists(); });
   }
-  if (tab === "agents") loadStatsAndSkills().catch(() => {});
+}
+
+// ---------------- 设置弹窗 ----------------
+
+function usageBarHtml(label, pct, resetText) {
+  const cls = pct >= 90 ? "danger" : pct >= 70 ? "warn" : "";
+  return `<div class="u-row"><span class="u-label">${esc(label)}</span>` +
+    `<div class="u-bar"><div class="u-fill ${cls}" style="width:${Math.min(100, pct)}%"></div></div>` +
+    `<span class="u-pct">${Math.round(pct)}%</span><span class="u-reset">${esc(resetText)}</span></div>`;
+}
+
+function fmtReset(iso) {
+  if (!iso) return "";
+  const ms = new Date(iso).getTime() - Date.now();
+  if (isNaN(ms) || ms <= 0) return "";
+  const h = ms / 36e5;
+  const txt = h < 1 ? `${Math.round(ms / 6e4)}m` : h < 48 ? `${Math.round(h)}h` : `${Math.round(h / 24)}d`;
+  return S.lang === "zh" ? `${txt}${t("resets_in")}` : `${txt}${t("resets_in")}`;
+}
+
+async function openSettings() {
+  $("stTheme").value = S.theme;
+  $("stLang").value = S.lang;
+  $("stUsage").innerHTML = $("stLocal").innerHTML = $("stSkills").innerHTML =
+    `<span class="muted">…</span>`;
+  openModal("modalSettings");
+  try {
+    const [u, sk] = await Promise.all([api("/api/usage"), api("/api/skills")]);
+    S.skillsInfo = sk;
+    // 订阅用量（和 /usage 命令同源）
+    if (u.subscription && u.subscription.length) {
+      $("stUsage").innerHTML = u.subscription
+        .map((w) => usageBarHtml(w.label, w.utilization || 0, fmtReset(w.resets_at))).join("");
+    } else {
+      $("stUsage").innerHTML = `<span class="muted">${esc(t("usage_unavailable"))}</span>`;
+    }
+    // 本系统自身消耗
+    const T = u.local.total;
+    if (!T.wakes) {
+      $("stLocal").innerHTML = `<span class="muted">${esc(t("stats_empty"))}</span>`;
+    } else {
+      const per = u.local.per_agent.map((p) => `${esc(p.name)} ×${p.wakes}`).join(" · ");
+      $("stLocal").innerHTML =
+        `${T.wakes} ${t("stats_wakes")} · ${t("stats_out")} ${fmtTok(T.output_tokens)} · ` +
+        `${t("stats_in")} ${fmtTok(T.input_tokens)} · ${t("stats_cache")} ${fmtTok(T.cache_read)}` +
+        `<div class="muted">${per}</div>`;
+    }
+    // 技能库入口
+    $("stSkills").innerHTML =
+      `<span class="muted">${sk.library.length} · ${sk.global.length}${esc(t("skills_global_hint"))}</span>` +
+      `<div style="margin-top:6px;display:flex;gap:8px;flex-wrap:wrap">` +
+      `<button class="mini-btn" data-open="lib">${esc(t("open_folder"))} skills/</button>` +
+      `<button class="mini-btn" data-open="global">${esc(t("open_folder"))} ~/.claude/skills</button></div>`;
+    $("stSkills").querySelectorAll("[data-open]").forEach((b) => {
+      b.onclick = () => api("/api/open_folder", {
+        path: b.dataset.open === "lib" ? sk.library_dir : sk.global_dir,
+      }).catch((e) => toast(e.message, 1));
+    });
+  } catch (e) {
+    $("stUsage").innerHTML = `<span class="muted">${esc(e.message)}</span>`;
+  }
+}
+
+// ---------------- 越权授权请求 ----------------
+
+function permCardHtml(r) {
+  return `<div class="perm-card" id="perm${r.id}">` +
+    `<div class="p-title">⚠ ${esc(r.agent)} ${esc(t("perm_title"))}</div>` +
+    `<div class="p-tool">${esc(r.tool)}</div>` +
+    `<div class="p-input">${esc(r.input_summary || "")}</div>` +
+    `<div class="p-btns"><button class="deny">${esc(t("deny"))}</button>` +
+    `<button class="allow">${esc(t("allow"))}</button></div></div>`;
+}
+
+function addPermCard(r) {
+  if ($("perm" + r.id)) return;
+  $("permPanel").insertAdjacentHTML("beforeend", permCardHtml(r));
+  const card = $("perm" + r.id);
+  card.querySelector(".allow").onclick = () => answerPerm(r.id, true);
+  card.querySelector(".deny").onclick = () => answerPerm(r.id, false);
+  notify(0, `${r.agent} ${t("perm_title")}`, r.tool);
+}
+
+async function answerPerm(rid, allow) {
+  try { await api(`/api/permissions/${rid}/answer`, { allow }); } catch (e) { toast(e.message, 1); }
+  const card = $("perm" + rid);
+  if (card) card.remove();
+}
+
+async function loadPendingPerms() {
+  try {
+    const d = await api("/api/permissions");
+    for (const r of d.pending) addPermCard(r);
+  } catch (e) { /* 静默 */ }
 }
 
 // ---------------- 桌面通知（窗口不在前台时弹） ----------------
@@ -712,7 +774,7 @@ function notify(convId, title, body) {
   if (Notification.permission === "default") { Notification.requestPermission(); return; }
   if (Notification.permission !== "granted") return;
   const n = new Notification(title, { body: body.slice(0, 120), tag: "conv" + convId });
-  n.onclick = () => { window.focus(); openConv(convId); n.close(); };
+  n.onclick = () => { window.focus(); if (convId) openConv(convId); n.close(); };
 }
 
 // ---------------- 事件绑定 ----------------
@@ -730,21 +792,23 @@ function bind() {
     };
   });
 
-  $("btnLang").onclick = () => {
-    S.lang = S.lang === "zh" ? "en" : "zh";
+  $("btnSettings").onclick = openSettings;
+
+  $("stLang").onchange = () => {
+    S.lang = $("stLang").value;
     localStorage.setItem("lang", S.lang);
     applyI18n();
     renderLists();
     if (S.cur) { renderChatHead(); renderMsgs(false); renderBanner(); renderTyping(); }
   };
 
-  $("btnTheme").onclick = () => {
-    S.theme = S.theme === "dark" ? "light" : "dark";
+  $("stTheme").onchange = () => {
+    S.theme = $("stTheme").value;
     localStorage.setItem("theme", S.theme);
     document.body.classList.toggle("light", S.theme === "light");
   };
 
-  $("btnPower").onclick = async () => {
+  $("stShutdown").onclick = async () => {
     if (!confirm(t("shutdown_confirm"))) return;
     try { await api("/api/shutdown", {}); } catch (e) { /* 连接断开是预期的 */ }
     toast(t("server_down"));

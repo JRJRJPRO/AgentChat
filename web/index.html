@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AgentChat</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%232e5c46'/%3E%3Ctext x='50' y='68' font-size='52' text-anchor='middle' fill='%23e6f4ec' font-family='sans-serif'%3E%E7%BE%A4%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+  <!-- ============ 左侧栏 ============ -->
+  <aside id="sidebar">
+    <header class="sb-head">
+      <div class="logo">AgentChat</div>
+      <div class="sb-actions">
+        <button id="btnNew" class="icon-btn" title="新建">＋</button>
+        <button id="btnLang" class="icon-btn" title="语言">文/A</button>
+      </div>
+      <div id="newMenu" class="menu hidden">
+        <div class="menu-item" data-act="new-agent" data-i18n="new_agent">新建 Agent</div>
+        <div class="menu-item" data-act="new-group" data-i18n="new_group">新建群聊</div>
+      </div>
+    </header>
+    <nav class="tabs">
+      <button class="tab active" data-tab="chats" data-i18n="tab_chats">聊天</button>
+      <button class="tab" data-tab="agents" data-i18n="tab_agents">Agent</button>
+      <button class="tab" data-tab="discover" data-i18n="tab_discover">发现</button>
+    </nav>
+    <div id="listChats" class="list"></div>
+    <div id="listAgents" class="list hidden"></div>
+    <div id="listDiscover" class="list hidden"></div>
+  </aside>
+
+  <!-- ============ 主区域 ============ -->
+  <main id="main">
+    <div id="empty" class="empty">
+      <div class="empty-icon">💬</div>
+      <div data-i18n="select_conv">选择一个会话开始</div>
+    </div>
+    <div id="chat" class="hidden">
+      <header id="chatHead">
+        <div class="head-info">
+          <div id="chatTitle" class="title"></div>
+          <div id="chatSub" class="sub"></div>
+        </div>
+        <button id="btnConvInfo" class="icon-btn">⋯</button>
+      </header>
+      <div id="banner" class="hidden"></div>
+      <div id="msgs"></div>
+      <div id="typing" class="hidden"></div>
+      <div id="composer">
+        <textarea id="input" rows="1" data-i18n-ph="input_ph" placeholder="输入消息，Enter 发送，Shift+Enter 换行"></textarea>
+        <button id="btnSend" data-i18n="send">发送</button>
+      </div>
+      <div id="spectateBar" class="hidden">
+        <span data-i18n="spectating">你不在此会话中，正在旁观</span>
+        <button id="btnJoin" data-i18n="join">加入</button>
+      </div>
+    </div>
+  </main>
+</div>
+
+<!-- ============ 弹窗 ============ -->
+<div id="overlay" class="hidden">
+  <!-- 新建 agent -->
+  <div class="modal hidden" id="modalAgent">
+    <h3 data-i18n="new_agent">新建 Agent</h3>
+    <label><span data-i18n="f_name">名字</span><input id="agName" placeholder="推进者 / 挑刺者 / 协调员..."></label>
+    <label><span data-i18n="f_model">模型</span><select id="agModel"></select></label>
+    <label><span data-i18n="f_perm">权限</span><select id="agPerm"></select></label>
+    <div class="hint" id="agPermHint"></div>
+    <label><span data-i18n="f_cwd">工作目录</span><input id="agCwd" data-i18n-ph="cwd_ph" placeholder="留空则自动创建 workspaces/名字"></label>
+    <label><span data-i18n="f_memo">备注</span><input id="agMemo" data-i18n-ph="memo_ph" placeholder="给自己看的一句话说明（职责在私聊里告诉它）"></label>
+    <div class="modal-btns">
+      <button class="btn-ghost" data-close data-i18n="cancel">取消</button>
+      <button class="btn-primary" id="agCreate" data-i18n="create">创建</button>
+    </div>
+  </div>
+
+  <!-- 编辑 agent -->
+  <div class="modal hidden" id="modalAgentEdit">
+    <h3 id="aeTitle"></h3>
+    <label><span data-i18n="f_model">模型</span><select id="aeModel"></select></label>
+    <label><span data-i18n="f_perm">权限</span><select id="aePerm"></select></label>
+    <label><span data-i18n="f_memo">备注</span><input id="aeMemo"></label>
+    <div class="hint" id="aeInfo"></div>
+    <div class="modal-btns">
+      <button class="btn-ghost" data-close data-i18n="cancel">取消</button>
+      <button class="btn-primary" id="aeSave" data-i18n="save">保存</button>
+    </div>
+  </div>
+
+  <!-- 新建群聊 -->
+  <div class="modal hidden" id="modalGroup">
+    <h3 data-i18n="new_group">新建群聊</h3>
+    <label><span data-i18n="f_group_name">群名</span><input id="gpName"></label>
+    <div class="sect" data-i18n="f_members">选择成员</div>
+    <div id="gpMembers" class="check-list"></div>
+    <label class="check-line"><input type="checkbox" id="gpIncludeMe" checked><span data-i18n="include_me">把我拉进群</span></label>
+    <div class="modal-btns">
+      <button class="btn-ghost" data-close data-i18n="cancel">取消</button>
+      <button class="btn-primary" id="gpCreate" data-i18n="create">创建</button>
+    </div>
+  </div>
+
+  <!-- 会话设置 -->
+  <div class="modal hidden" id="modalConv">
+    <h3 data-i18n="conv_settings">会话信息</h3>
+    <div id="cvNameRow"><label><span data-i18n="f_group_name">群名</span><input id="cvName"></label></div>
+    <div class="sect" data-i18n="members">成员</div>
+    <div id="cvMembers" class="member-list"></div>
+    <div id="cvAddRow" class="add-row">
+      <select id="cvAddSel"></select>
+      <button id="cvAddBtn" class="btn-ghost" data-i18n="add_member">添加成员</button>
+    </div>
+    <label><span data-i18n="chain_limit">Agent 连发上限</span><input id="cvChain" type="number" min="1" style="width:90px"></label>
+    <div class="hint" data-i18n="chain_hint">你不发言时 agent 最多累计连发多少条，超过自动暂停传递（防互聊刷额度）</div>
+    <div class="modal-btns">
+      <button class="btn-danger hidden" id="cvLeave" data-i18n="leave_group">退出群聊</button>
+      <button class="btn-ghost" data-close data-i18n="close">关闭</button>
+      <button class="btn-primary" id="cvSave" data-i18n="save">保存</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="hidden"></div>
+
+<script src="i18n.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

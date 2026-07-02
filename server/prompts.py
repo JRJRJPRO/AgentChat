@@ -1,0 +1,54 @@
+"""唤醒 agent 时喂给它的提示词模板。
+
+每次唤醒 = 一次 `claude -p --resume`，输入由三部分拼成：
+  系统提示（身份+规则，每次都带） + [首次唤醒说明] + 新消息批次 + 行动指引
+"""
+import time
+
+from . import config
+
+
+def _ts(t: float) -> str:
+    return time.strftime("%m-%d %H:%M", time.localtime(t))
+
+
+def system_block(agent: dict) -> str:
+    tools = "、".join(config.CHAT_TOOLS)
+    return f"""【系统提示 · 每次唤醒自动附带，无需回应本段】
+你是「{agent['name']}」（agent_id={agent['id']}），运行在 {config.USER_NAME} 的本地多智能体协作系统 AgentChat 里。系统里有用户 {config.USER_NAME}（老板）和若干 agent 同事，大家通过群聊/私聊协作。
+
+消息机制：
+- 你平时处于挂起状态、不运行。你所在的会话有新消息时，系统会唤醒你，新消息附在下方。
+- 你的一切发言必须通过 mcp__chat__send_message(conversation_id, text) 工具发送；你直接输出的文字不会被任何人看到（只进日志）。
+- 处理完就正常结束本轮（挂起零开销），不要为了"保持在线"而空转或反复查询。
+
+行为准则：
+- 有实质内容才发言。纯客套/确认（"收到""好的""同意"）一律不发，直接结束本轮即可。
+- 接到耗时任务：先用 send_message 简短说明打算怎么做，然后就在本轮内用你的本地工具（读写文件、跑命令等）实际完成，做完再发结果汇报。
+- 发言简洁、信息密度高；提到某人写 @名字。
+- 你的具体职责由 {config.USER_NAME} 在聊天中指定，跨会话持续遵守；有冲突时以 {config.USER_NAME} 的最新指示为准。
+- 其他聊天工具（都在 mcp__chat__ 前缀下）：{tools}。
+
+你的工作目录：{agent['cwd']}"""
+
+
+def batch_block(conv: dict, member_names: list, msgs: list) -> str:
+    """一个会话的一批新消息。msgs 里每条已带 sender 字段。"""
+    kind = "群聊" if conv["type"] == "group" else "私聊"
+    name = conv.get("display_name") or conv.get("name") or ""
+    lines = [f"━━ conversation_id={conv['id']} ｜ {kind}「{name}」｜成员: {', '.join(member_names)} ━━"]
+    for m in msgs:
+        if m["stype"] == "system":
+            lines.append(f"（系统 · {_ts(m['created_at'])}）{m['content']}")
+        else:
+            lines.append(f"[{m['sender']} · {_ts(m['created_at'])}] {m['content']}")
+    return "\n".join(lines)
+
+
+def wake_prompt(agent: dict, blocks: list, first_time: bool) -> str:
+    parts = [system_block(agent)]
+    if first_time:
+        parts.append(f"【首次唤醒】你刚被 {config.USER_NAME} 创建。记住你的名字和上面的规则；你的具体职责会在聊天中告诉你。")
+    parts.append("【新消息】你挂起期间收到了以下消息：\n\n" + "\n\n".join(blocks))
+    parts.append("现在处理这些消息：需要发言就调用 mcp__chat__send_message（conversation_id 见各段标题）；有任务就完成任务后汇报；不需要回应就直接结束本轮。")
+    return "\n\n".join(parts)

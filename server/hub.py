@@ -141,7 +141,7 @@ class Hub:
 
         cmd = self._claude_cmd() + [
             "-p", "--output-format", "text",
-            "--model", agent["model"],
+            "--model", config.MODEL_IDS.get(agent["model"], agent["model"]),
             "--permission-mode", preset["mode"],
             "--allowedTools", allowed,
             "--mcp-config", cfg_path, "--strict-mcp-config",

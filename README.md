@@ -63,6 +63,22 @@ agent 正在干活时你又想到一个点，有两条路，系统都支持：
 
    与"停止"的区别：停止=硬丢弃这批消息，它不会再看到。
 
+## 记忆（memory）
+
+每个 agent 有两层记忆：
+
+- **会话记忆**（自动）：`--resume` 让它跨唤醒记得所有聊过的内容，聊长了自动压缩。
+- **长期记忆**（CLAUDE.md 机制，比 `~/.claude/projects` 的 memory 目录在无头模式下更可靠）：
+  - `workspaces/<名字>/CLAUDE.md` —— 该 agent 的**私有**长期记忆，每次唤醒自动全文进上下文，
+    它自己或你都能编辑；首次唤醒时自动生成模板，已有的不会被覆盖。
+  - `shared/TEAM.md` —— **全员共享**知识库，被每个 agent 的 CLAUDE.md `@` 导入。
+    John 的偏好、项目背景、协作约定写这里，所有 agent（含以后新建的）自动可见。
+
+想把你积累的旧 memory（`C:\Users\JRJ\.claude\projects\...`）灌给 agent 们：开一个"档案员"
+agent，额外目录给它 `D:\JRJ\实习\AgentChat\shared`，让它读旧 memory 文件、把值得共享的
+蒸馏进 `shared/TEAM.md`（读任何文件本来就不需要授权，写 shared 需要额外目录或授权）。
+注意保持 TEAM.md 精炼——它的每个字都进每个 agent 的每次上下文。
+
 ## 技能（skills）
 
 - **全局技能** `~/.claude/skills/`：所有 agent（以及你所有 Claude Code 会话）自动可见，不用管。

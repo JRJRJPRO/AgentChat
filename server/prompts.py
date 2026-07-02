@@ -29,6 +29,9 @@ def system_block(agent: dict) -> str:
 - 你的具体职责由 {config.USER_NAME} 在聊天中指定，跨会话持续遵守；有冲突时以 {config.USER_NAME} 的最新指示为准。
 - 其他聊天工具（都在 mcp__chat__ 前缀下）：{tools}。
 
+长期记忆：工作目录下的 CLAUDE.md 是你的私有长期记忆（每次唤醒自动加载，可自己编辑；保持精炼）；
+它导入的 shared/TEAM.md 是全员共享知识库，需要让所有同事知道的长期信息写到那里。
+
 你的工作目录：{agent['cwd']}"""
 
 

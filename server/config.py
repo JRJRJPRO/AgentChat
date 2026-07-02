@@ -10,6 +10,8 @@ WORKSPACES_DIR = os.path.join(BASE_DIR, "workspaces")
 WEB_DIR = os.path.join(BASE_DIR, "web")
 SKILLS_DIR = os.path.join(BASE_DIR, "skills")                       # AgentChat 技能库（按 agent 勾选分发）
 GLOBAL_SKILLS_DIR = os.path.expanduser(os.path.join("~", ".claude", "skills"))  # 全局技能，所有 agent 天生可见
+SHARED_DIR = os.path.join(BASE_DIR, "shared")                       # 团队共享知识库
+SHARED_TEAM_FILE = os.path.join(SHARED_DIR, "TEAM.md")              # 所有 agent 每次唤醒都读到
 
 HOST = "127.0.0.1"
 PORT = 8787
@@ -53,5 +55,13 @@ ALLOWED_CHAT_TOOLS = [f"mcp__chat__{t}" for t in CHAT_TOOLS]
 
 
 def ensure_dirs():
-    for d in (DATA_DIR, LOG_DIR, MCP_DIR, WORKSPACES_DIR, SKILLS_DIR):
+    for d in (DATA_DIR, LOG_DIR, MCP_DIR, WORKSPACES_DIR, SKILLS_DIR, SHARED_DIR):
         os.makedirs(d, exist_ok=True)
+    if not os.path.exists(SHARED_TEAM_FILE):
+        with open(SHARED_TEAM_FILE, "w", encoding="utf-8") as f:
+            f.write(
+                "# 团队共享知识库\n\n"
+                "所有 agent 每次唤醒都会自动读到本文件（通过各自工作目录 CLAUDE.md 的 @ 引用）。\n"
+                "把需要全员知道的长期知识写在这里：John 的偏好、项目背景、协作约定等。\n"
+                "保持精炼——这里的每个字都会进入每个 agent 的上下文。\n"
+            )

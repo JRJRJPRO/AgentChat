@@ -172,6 +172,7 @@ class Hub:
         cmd += ["--session-id", agent["session_id"]] if first else ["--resume", agent["session_id"]]
 
         os.makedirs(agent["cwd"], exist_ok=True)
+        self._ensure_claude_md(agent)
         log_path = os.path.join(config.LOG_DIR, f"agent{aid}_{int(time.time())}.log")
         env = dict(os.environ)
         for k in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT"):
@@ -244,6 +245,24 @@ class Hub:
             await self.broadcast({"t": "agent", "id": aid, "run": "idle"})
 
     # ---------- 工具 ----------
+
+    @staticmethod
+    def _ensure_claude_md(agent):
+        """agent 的两级长期记忆：工作目录 CLAUDE.md（私有）+ @导入 shared/TEAM.md（全员共享）。
+        CLAUDE.md 每次启动必定全文进上下文（无头模式也是），比 memory 目录可靠。
+        只在缺失时生成模板，已有的绝不覆盖。"""
+        path = os.path.join(agent["cwd"], "CLAUDE.md")
+        if os.path.exists(path):
+            return
+        team = config.SHARED_TEAM_FILE.replace("\\", "/")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(
+                f"# 「{agent['name']}」的长期记忆\n\n"
+                f"@{team}\n\n"
+                "上面一行导入了团队共享知识库（全员共用；要改共享内容请编辑那个文件本身）。\n"
+                "从这里往下是只属于你的长期知识：职责总结、John 的相关偏好、踩坑经验。\n"
+                "本文件每次唤醒都自动进入你的上下文，你可以随时自己编辑更新——保持精炼。\n"
+            )
 
     @staticmethod
     def _parse_usage(log_path):

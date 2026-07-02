@@ -499,11 +499,15 @@ function fillSelect(sel, options, value) {
 async function renderSkillChecks(rootId, checkedNames) {
   const root = $(rootId);
   root.innerHTML = "";
+  // 清掉上次遗留在 root 旁边的全局技能说明，避免重复叠加
+  while (root.nextElementSibling && root.nextElementSibling.classList.contains("skill-note")) {
+    root.nextElementSibling.remove();
+  }
   try {
     if (!S.skillsInfo) S.skillsInfo = await api("/api/skills");
     const lib = S.skillsInfo.library;
     if (!lib.length) {
-      root.innerHTML = `<div class="hint" style="margin:0">${esc(t("skills_none"))}</div>`;
+      root.insertAdjacentHTML("afterend", `<div class="skill-note">${esc(t("skills_none"))}</div>`);
       return;
     }
     for (const s of lib) {
@@ -514,8 +518,8 @@ async function renderSkillChecks(rootId, checkedNames) {
         `<span><b>${esc(s.name)}</b>${s.description ? " — " + esc(s.description.slice(0, 60)) : ""}</span>`;
       root.appendChild(line);
     }
-    root.insertAdjacentHTML("beforeend",
-      `<div class="hint" style="margin:6px 0 0">${S.skillsInfo.global.length}${esc(t("skills_global_hint"))}</div>`);
+    root.insertAdjacentHTML("afterend",
+      `<div class="skill-note">${S.skillsInfo.global.length}${esc(t("skills_global_hint"))}</div>`);
   } catch (e) { root.innerHTML = ""; }
 }
 
@@ -569,6 +573,7 @@ function openAgentEdit(a) {
   $("aeAsk").checked = !!a.ask_perm;
   $("aePermHint").textContent = t("perm_" + a.permission);
   $("aeInfo").textContent = `${t("f_cwd")}: ${a.cwd}`;
+  $("aeInfo").className = "info-line";
   renderSkillChecks("aeSkills", a.skills || []);
   openModal("modalAgentEdit");
 }

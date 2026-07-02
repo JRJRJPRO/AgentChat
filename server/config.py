@@ -20,9 +20,10 @@ HUB_URL = f"http://{HOST}:{PORT}"
 USER_NAME = "John"          # agent 眼中用户的名字；界面里显示为"我"
 
 DEFAULT_MODEL = "sonnet"
-MODELS = ["sonnet", "opus", "haiku"]
+MODELS = ["fable", "sonnet", "opus", "haiku"]
 # 传给 claude CLI 的完整模型 id（旧版 CLI 的别名可能指向已下线的模型，所以显式指定）
 MODEL_IDS = {
+    "fable": "claude-fable-5",
     "sonnet": "claude-sonnet-5",
     "opus": "claude-opus-4-8",
     "haiku": "claude-haiku-4-5-20251001",

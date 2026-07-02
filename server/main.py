@@ -55,6 +55,17 @@ async def lifespan(app):
 app = FastAPI(lifespan=lifespan)
 
 
+@app.middleware("http")
+async def no_cache_static(request, call_next):
+    """本地服务器，静态文件禁缓存：防止浏览器拿旧 css/js 和新版本混搭出怪样。
+    no-cache = 每次向服务器确认（未变返回 304），文件都在本机，零成本。"""
+    resp = await call_next(request)
+    p = request.url.path
+    if not (p.startswith("/api") or p.startswith("/internal") or p == "/ws"):
+        resp.headers["Cache-Control"] = "no-cache"
+    return resp
+
+
 def agent_view(a):
     """给前端的 agent 信息（去掉 token/session 等内部字段）。"""
     return {

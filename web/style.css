@@ -275,9 +275,29 @@ body {
 .modal input:focus, .modal select:focus { border-color: var(--accent); }
 .hint { color: var(--muted); font-size: 12px; margin: -4px 0 12px 120px; line-height: 1.5; }
 .sect { color: var(--muted); font-size: 12px; margin: 10px 0 8px; font-weight: 600; }
-.check-list { max-height: 180px; overflow-y: auto; margin-bottom: 10px; }
-.check-line { display: flex; align-items: center; gap: 8px !important; padding: 5px 2px; cursor: pointer; }
-.check-line input { flex: 0 0 auto; width: auto !important; }
+.check-list {
+  max-height: 200px; overflow-y: auto; margin-bottom: 12px;
+  background: var(--panel2); border: 1px solid var(--border); border-radius: 8px;
+  padding: 4px 8px;
+}
+.check-list:empty { display: none; }
+.check-line {
+  display: flex; align-items: center; gap: 8px !important; padding: 7px 6px; cursor: pointer;
+  border-radius: 6px; line-height: 1.4;
+}
+.check-line + .check-line { border-top: 1px solid var(--border); }
+.check-line:hover { background: var(--panel); }
+.check-line input { flex: 0 0 auto; width: auto !important; margin: 0; }
+.check-line span { flex: 1; width: auto; min-width: 0; font-size: 13px; color: var(--text); }
+.check-line span b { font-weight: 600; }
+/* 技能区里的说明灰字 */
+.skill-note { color: var(--muted); font-size: 12px; margin: 4px 2px 12px; line-height: 1.5; }
+/* 编辑弹窗底部的信息条 */
+.info-line {
+  color: var(--muted); font-size: 12px; margin: 0 0 12px; line-height: 1.5;
+  background: var(--panel2); border: 1px solid var(--border); border-radius: 8px;
+  padding: 8px 10px; word-break: break-all; font-family: Consolas, monospace;
+}
 .member-list { margin-bottom: 10px; }
 .member-line { display: flex; align-items: center; gap: 10px; padding: 6px 2px; }
 .member-line .m-name { flex: 1; }

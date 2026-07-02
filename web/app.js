@@ -7,6 +7,9 @@
 
 const S = {
   lang: localStorage.getItem("lang") || "zh",
+  theme: localStorage.getItem("theme") || "dark",
+  stats: null,
+  skillsInfo: null,
   tab: "chats",
   agents: [],
   convs: [],          // 我的会话摘要
@@ -77,6 +80,23 @@ function fmtTime(ts) {
   return `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${hm}`;
 }
 
+// 聊天里的日期分隔线：今天 / 昨天 / 2026-07-01
+function dayKey(ts) { return new Date(ts * 1000).toDateString(); }
+function dayLabel(ts) {
+  const d = new Date(ts * 1000), now = new Date();
+  if (d.toDateString() === now.toDateString()) return t("today");
+  const yd = new Date(now.getTime() - 864e5);
+  if (d.toDateString() === yd.toDateString()) return t("yesterday");
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+function dividerHtml(ts) { return `<div class="day-divider">${esc(dayLabel(ts))}</div>`; }
+
+function fmtTok(n) {
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + "k";
+  return String(n);
+}
+
 const AVATAR_COLORS = ["#4f6df5","#9256d9","#c94f7c","#c96b3b","#3f9e6e","#3a8fb7","#b3822e","#6d7f3a"];
 function avatarColor(name) {
   let h = 0;
@@ -112,6 +132,8 @@ function renderLists() {
   renderConvList($("listChats"), S.convs, "empty_chats", false);
   renderAgentList();
   renderConvList($("listDiscover"), S.discover, "empty_discover", true);
+  const unread = S.convs.reduce((n, c) => n + (c.unread || 0), 0);
+  document.title = (unread ? `(${unread}) ` : "") + "AgentChat";
 }
 
 function renderConvList(root, convs, emptyKey, isDiscover) {
@@ -148,11 +170,51 @@ function renderConvList(root, convs, emptyKey, isDiscover) {
   }
 }
 
+function statsCardHtml() {
+  const st = S.stats, sk = S.skillsInfo;
+  let inner;
+  if (!st || !st.total.wakes) {
+    inner = `<div class="s-row" style="color:var(--muted)">${esc(t("stats_empty"))}</div>`;
+  } else {
+    const T = st.total;
+    inner =
+      `<div class="s-row">` +
+      `<span><span class="s-num">${T.wakes}</span> ${esc(t("stats_wakes"))}</span>` +
+      `<span>${esc(t("stats_out"))} <span class="s-num">${fmtTok(T.output_tokens)}</span></span>` +
+      `<span>${esc(t("stats_in"))} <span class="s-num">${fmtTok(T.input_tokens)}</span></span>` +
+      `<span>${esc(t("stats_cache"))} <span class="s-num">${fmtTok(T.cache_read)}</span></span>` +
+      `<span>${esc(t("stats_cost"))} <span class="s-num">$${T.cost_usd.toFixed(2)}</span></span></div>`;
+    const per = st.per_agent.map((p) => `${esc(p.name)} ×${p.wakes} ($${p.cost_usd.toFixed(2)})`).join(" · ");
+    if (per) inner += `<div class="s-agents">${per}</div>`;
+  }
+  let lib = "";
+  if (sk) {
+    lib = `<div class="lib-line">${esc(t("skills_lib"))}: ${sk.library.length} · ` +
+      `${sk.global.length}${esc(t("skills_global_hint"))} ` +
+      `<button class="mini-btn" data-open="lib">${esc(t("open_folder"))} skills/</button>` +
+      `<button class="mini-btn" data-open="global">${esc(t("open_folder"))} ~/.claude/skills</button></div>`;
+  }
+  return `<div class="stats-card"><div class="s-title">${esc(t("stats_title"))}</div>${inner}${lib}</div>`;
+}
+
+async function loadStatsAndSkills() {
+  const [st, sk] = await Promise.all([api("/api/stats?hours=5"), api("/api/skills")]);
+  S.stats = st;
+  S.skillsInfo = sk;
+  renderAgentList();
+}
+
 function renderAgentList() {
   const root = $("listAgents");
   root.innerHTML = "";
+  root.insertAdjacentHTML("beforeend", statsCardHtml());
+  root.querySelectorAll("[data-open]").forEach((b) => {
+    b.onclick = () => api("/api/open_folder", {
+      path: b.dataset.open === "lib" ? S.skillsInfo.library_dir : S.skillsInfo.global_dir,
+    }).catch((e) => toast(e.message, 1));
+  });
   if (!S.agents.length) {
-    root.innerHTML = `<div class="list-empty">${esc(t("empty_agents"))}</div>`;
+    root.insertAdjacentHTML("beforeend", `<div class="list-empty">${esc(t("empty_agents"))}</div>`);
     return;
   }
   for (const a of S.agents) {
@@ -179,7 +241,11 @@ function renderAgentList() {
       openConv(r.conv_id);
       setTab("chats");
     });
-    if (running) addBtn(t("stop"), "danger", () => api(`/api/agents/${a.id}/stop`, {}).catch((e) => toast(e.message, 1)));
+    if (running) {
+      addBtn(t("interrupt"), "warn", () => interruptAgent(a.id));
+      addBtn(t("stop"), "danger", () => api(`/api/agents/${a.id}/stop`, {}).catch((e) => toast(e.message, 1)));
+      btns.title = t("interrupt_hint");
+    }
     if (a.status === "active") addBtn(t("pause"), "warn", () => setAgentStatus(a.id, "paused"));
     if (a.status === "paused") addBtn(t("resume"), "", () => setAgentStatus(a.id, "active"));
     if (a.status !== "archived") addBtn(t("archive"), "", () => setAgentStatus(a.id, "archived"));
@@ -256,16 +322,24 @@ function renderMsgs(scrollBottom) {
   let html = "";
   if (S.msgs.length === 0) html += `<div class="load-hint">${esc(t("no_msgs"))}</div>`;
   else if (!S.hasMore) html += `<div class="load-hint">${esc(t("no_more"))}</div>`;
-  for (const m of S.msgs) html += msgHtml(m);
+  let prevDay = null;
+  for (const m of S.msgs) {
+    const dk = dayKey(m.created_at);
+    if (dk !== prevDay) { html += dividerHtml(m.created_at); prevDay = dk; }
+    html += msgHtml(m);
+  }
   box.innerHTML = html;
   if (scrollBottom) box.scrollTop = box.scrollHeight;
 }
 
 function appendMsg(m) {
+  const last = S.msgs[S.msgs.length - 1];
   if (!pushMsg(m, false)) return;
   const box = $("msgs");
   const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 120;
-  box.insertAdjacentHTML("beforeend", msgHtml(m));
+  let html = "";
+  if (!last || dayKey(last.created_at) !== dayKey(m.created_at)) html += dividerHtml(m.created_at);
+  box.insertAdjacentHTML("beforeend", html + msgHtml(m));
   if (nearBottom || m.stype === "user") box.scrollTop = box.scrollHeight;
 }
 
@@ -325,14 +399,23 @@ function renderBanner() {
   }
 }
 
+async function interruptAgent(aid) {
+  try {
+    const r = await api(`/api/agents/${aid}/interrupt`, {});
+    if (r.ok) toast(t("interrupt_done"));
+  } catch (e) { toast(e.message, 1); }
+}
+
 function renderTyping() {
   const el = $("typing");
   if (!S.cur) return el.classList.add("hidden");
-  const names = S.cur.members
-    .filter((m) => m.mtype === "agent" && S.working.has(m.mid))
-    .map((m) => m.name);
-  if (names.length) {
-    el.textContent = `${names.join("、")} ${t("typing")}`;
+  const workers = S.cur.members.filter((m) => m.mtype === "agent" && S.working.has(m.mid));
+  if (workers.length) {
+    el.innerHTML = `${esc(workers.map((m) => m.name).join("、"))} ${esc(t("typing"))} ` +
+      workers.map((m) =>
+        `<button class="mini-btn warn" data-int="${m.mid}" title="${esc(t("interrupt_hint"))}">⏹ ${esc(t("interrupt"))} ${esc(m.name)}</button>`
+      ).join(" ");
+    el.querySelectorAll("[data-int]").forEach((b) => (b.onclick = () => interruptAgent(+b.dataset.int)));
     el.classList.remove("hidden");
   } else {
     el.classList.add("hidden");
@@ -404,6 +487,9 @@ function connectWS() {
 
 function onWsMsg(d) {
   const c = S.convs.find((x) => x.id === d.conv_id);
+  if (c && d.message.stype !== "user" && d.message.stype !== "system") {
+    notify(d.conv_id, c.display_name, `${d.message.sender}: ${d.message.content}`);
+  }
   if (c) {
     c.last_msg = d.message;
     c.last_ts = d.message.created_at;
@@ -445,11 +531,39 @@ function fillSelect(sel, options, value) {
   if (value) sel.value = value;
 }
 
+async function renderSkillChecks(rootId, checkedNames) {
+  const root = $(rootId);
+  root.innerHTML = "";
+  try {
+    if (!S.skillsInfo) S.skillsInfo = await api("/api/skills");
+    const lib = S.skillsInfo.library;
+    if (!lib.length) {
+      root.innerHTML = `<div class="hint" style="margin:0">${esc(t("skills_none"))}</div>`;
+      return;
+    }
+    for (const s of lib) {
+      const line = document.createElement("label");
+      line.className = "check-line";
+      const on = checkedNames.includes(s.name) ? "checked" : "";
+      line.innerHTML = `<input type="checkbox" value="${esc(s.name)}" ${on}>` +
+        `<span><b>${esc(s.name)}</b>${s.description ? " — " + esc(s.description.slice(0, 60)) : ""}</span>`;
+      root.appendChild(line);
+    }
+    root.insertAdjacentHTML("beforeend",
+      `<div class="hint" style="margin:6px 0 0">${S.skillsInfo.global.length}${esc(t("skills_global_hint"))}</div>`);
+  } catch (e) { root.innerHTML = ""; }
+}
+
+function checkedSkills(rootId) {
+  return [...$(rootId).querySelectorAll("input:checked")].map((x) => x.value);
+}
+
 function openNewAgent() {
   fillSelect($("agModel"), S.models, S.defaults.model);
   fillSelect($("agPerm"), S.permissions, S.defaults.permission);
-  $("agName").value = ""; $("agCwd").value = ""; $("agMemo").value = "";
+  $("agName").value = ""; $("agCwd").value = ""; $("agMemo").value = ""; $("agDirs").value = "";
   updatePermHint();
+  renderSkillChecks("agSkills", []);
   openModal("modalAgent");
   $("agName").focus();
 }
@@ -466,6 +580,8 @@ async function createAgent() {
       permission: $("agPerm").value,
       cwd: $("agCwd").value,
       memo: $("agMemo").value,
+      extra_dirs: $("agDirs").value,
+      skills: checkedSkills("agSkills"),
     });
     closeModal();
     toast(t("agent_created"));
@@ -482,7 +598,10 @@ function openAgentEdit(a) {
   fillSelect($("aeModel"), S.models, a.model);
   fillSelect($("aePerm"), S.permissions, a.permission);
   $("aeMemo").value = a.memo || "";
+  $("aeDirs").value = a.extra_dirs || "";
+  $("aePermHint").textContent = t("perm_" + a.permission);
   $("aeInfo").textContent = `${t("f_cwd")}: ${a.cwd}`;
+  renderSkillChecks("aeSkills", a.skills || []);
   openModal("modalAgentEdit");
 }
 
@@ -492,6 +611,8 @@ async function saveAgentEdit() {
       model: $("aeModel").value,
       permission: $("aePerm").value,
       memo: $("aeMemo").value,
+      extra_dirs: $("aeDirs").value,
+      skills: checkedSkills("aeSkills"),
     });
     closeModal();
     refreshLists();
@@ -581,6 +702,17 @@ function setTab(tab) {
   if (tab === "discover") {
     api("/api/convs?scope=all").then((d) => { S.discover = d.convs; renderLists(); });
   }
+  if (tab === "agents") loadStatsAndSkills().catch(() => {});
+}
+
+// ---------------- 桌面通知（窗口不在前台时弹） ----------------
+
+function notify(convId, title, body) {
+  if (document.hasFocus() || !("Notification" in window)) return;
+  if (Notification.permission === "default") { Notification.requestPermission(); return; }
+  if (Notification.permission !== "granted") return;
+  const n = new Notification(title, { body: body.slice(0, 120), tag: "conv" + convId });
+  n.onclick = () => { window.focus(); openConv(convId); n.close(); };
 }
 
 // ---------------- 事件绑定 ----------------
@@ -605,6 +737,24 @@ function bind() {
     renderLists();
     if (S.cur) { renderChatHead(); renderMsgs(false); renderBanner(); renderTyping(); }
   };
+
+  $("btnTheme").onclick = () => {
+    S.theme = S.theme === "dark" ? "light" : "dark";
+    localStorage.setItem("theme", S.theme);
+    document.body.classList.toggle("light", S.theme === "light");
+  };
+
+  $("btnPower").onclick = async () => {
+    if (!confirm(t("shutdown_confirm"))) return;
+    try { await api("/api/shutdown", {}); } catch (e) { /* 连接断开是预期的 */ }
+    toast(t("server_down"));
+  };
+
+  $("aePerm").onchange = () => { $("aePermHint").textContent = t("perm_" + $("aePerm").value); };
+
+  if ("Notification" in window && Notification.permission === "default") {
+    document.addEventListener("click", () => Notification.requestPermission(), { once: true });
+  }
 
   const input = $("input");
   input.addEventListener("keydown", (e) => {
@@ -670,6 +820,7 @@ function bind() {
 // ---------------- 启动 ----------------
 
 (async function init() {
+  document.body.classList.toggle("light", S.theme === "light");
   applyI18n();
   bind();
   await refreshLists();

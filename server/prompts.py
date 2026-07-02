@@ -45,10 +45,25 @@ def batch_block(conv: dict, member_names: list, msgs: list) -> str:
     return "\n".join(lines)
 
 
-def wake_prompt(agent: dict, blocks: list, first_time: bool) -> str:
-    parts = [system_block(agent)]
+def wake_prompt(agent: dict, blocks: list, first_time: bool, interrupted: bool = False) -> str:
+    """首次唤醒喂完整规则；之后只带两行提醒——完整规则已在会话历史里，
+    每次重复只会稀释上下文、多花 token。"""
+    parts = []
     if first_time:
+        parts.append(system_block(agent))
         parts.append(f"【首次唤醒】你刚被 {config.USER_NAME} 创建。记住你的名字和上面的规则；你的具体职责会在聊天中告诉你。")
+    if interrupted:
+        parts.append(f"【注意】你上一轮工作被 {config.USER_NAME} 打断（通常是有紧急补充）。"
+                     "下面的消息里有最新指示；结合你已完成的部分继续，不要从头重来。")
     parts.append("【新消息】你挂起期间收到了以下消息：\n\n" + "\n\n".join(blocks))
-    parts.append("现在处理这些消息：需要发言就调用 mcp__chat__send_message（conversation_id 见各段标题）；有任务就完成任务后汇报；不需要回应就直接结束本轮。")
+    if first_time:
+        parts.append("现在处理这些消息：需要发言就调用 mcp__chat__send_message（conversation_id 见各段标题）；有任务就完成任务后汇报；不需要回应就直接结束本轮。")
+    else:
+        parts.append("提醒：发言必须用 mcp__chat__send_message(conversation_id, text)；无实质内容就直接结束本轮。")
     return "\n\n".join(parts)
+
+
+def piggyback_block(blocks: list) -> str:
+    """agent 干活期间到达的新消息，搭工具调用返回值的便车送达（零额外唤醒成本）。"""
+    return ("\n\n【你工作期间收到了新消息，处理完当前步骤后请一并考虑】\n"
+            + "\n\n".join(blocks))

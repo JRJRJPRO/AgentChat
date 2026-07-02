@@ -15,7 +15,9 @@
       <div class="logo">AgentChat</div>
       <div class="sb-actions">
         <button id="btnNew" class="icon-btn" title="新建">＋</button>
+        <button id="btnTheme" class="icon-btn" title="主题">🌗</button>
         <button id="btnLang" class="icon-btn" title="语言">文/A</button>
+        <button id="btnPower" class="icon-btn" title="关闭服务器">⏻</button>
       </div>
       <div id="newMenu" class="menu hidden">
         <div class="menu-item" data-act="new-agent" data-i18n="new_agent">新建 Agent</div>
@@ -71,7 +73,10 @@
     <label><span data-i18n="f_perm">权限</span><select id="agPerm"></select></label>
     <div class="hint" id="agPermHint"></div>
     <label><span data-i18n="f_cwd">工作目录</span><input id="agCwd" data-i18n-ph="cwd_ph" placeholder="留空则自动创建 workspaces/名字"></label>
+    <label><span data-i18n="f_extra_dirs">额外目录</span><input id="agDirs" data-i18n-ph="extra_dirs_ph"></label>
     <label><span data-i18n="f_memo">备注</span><input id="agMemo" data-i18n-ph="memo_ph" placeholder="给自己看的一句话说明（职责在私聊里告诉它）"></label>
+    <div class="sect" data-i18n="f_skills">技能</div>
+    <div id="agSkills" class="check-list"></div>
     <div class="modal-btns">
       <button class="btn-ghost" data-close data-i18n="cancel">取消</button>
       <button class="btn-primary" id="agCreate" data-i18n="create">创建</button>
@@ -83,7 +88,11 @@
     <h3 id="aeTitle"></h3>
     <label><span data-i18n="f_model">模型</span><select id="aeModel"></select></label>
     <label><span data-i18n="f_perm">权限</span><select id="aePerm"></select></label>
+    <div class="hint" id="aePermHint"></div>
+    <label><span data-i18n="f_extra_dirs">额外目录</span><input id="aeDirs" data-i18n-ph="extra_dirs_ph"></label>
     <label><span data-i18n="f_memo">备注</span><input id="aeMemo"></label>
+    <div class="sect" data-i18n="f_skills">技能</div>
+    <div id="aeSkills" class="check-list"></div>
     <div class="hint" id="aeInfo"></div>
     <div class="modal-btns">
       <button class="btn-ghost" data-close data-i18n="cancel">取消</button>

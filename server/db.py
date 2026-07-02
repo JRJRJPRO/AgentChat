@@ -67,6 +67,21 @@ CREATE TABLE IF NOT EXISTS cursors(
   PRIMARY KEY(mtype, mid, conv_id)
 );
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS wakes(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  agent_id INTEGER NOT NULL,
+  started REAL NOT NULL,
+  ended REAL,
+  rc INTEGER,
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_read INTEGER NOT NULL DEFAULT 0,
+  cache_creation INTEGER NOT NULL DEFAULT 0,
+  cost_usd REAL NOT NULL DEFAULT 0,
+  num_turns INTEGER NOT NULL DEFAULT 0,
+  log_path TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_wakes_time ON wakes(started);
 """
 
 USER = ("user", 0)
@@ -82,6 +97,16 @@ def init():
         _con.executescript(SCHEMA)
         _con.execute("INSERT OR IGNORE INTO meta VALUES('schema_version','1')")
         _con.commit()
+    _migrate()
+
+
+def _migrate():
+    """老库补新列（新库建表时也走这里，幂等）。"""
+    cols = {r["name"] for r in _rows("PRAGMA table_info(agents)")}
+    if "extra_dirs" not in cols:
+        _exec("ALTER TABLE agents ADD COLUMN extra_dirs TEXT NOT NULL DEFAULT ''")
+    if "skills" not in cols:
+        _exec("ALTER TABLE agents ADD COLUMN skills TEXT NOT NULL DEFAULT ''")
 
 
 def _rows(sql, args=()):
@@ -136,6 +161,40 @@ def update_agent(aid, **kw):
 
 def record_wake(aid):
     _exec("UPDATE agents SET wake_count=wake_count+1, last_wake_at=? WHERE id=?", (time.time(), aid))
+
+
+def add_wake(agent_id, started, rc, usage, log_path):
+    """记一次唤醒的用量。usage 来自 claude -p 的 JSON 输出，可能缺字段。"""
+    u = usage or {}
+    _exec(
+        """INSERT INTO wakes(agent_id,started,ended,rc,input_tokens,output_tokens,
+           cache_read,cache_creation,cost_usd,num_turns,log_path) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+        (agent_id, started, time.time(), rc,
+         u.get("input_tokens", 0), u.get("output_tokens", 0),
+         u.get("cache_read_input_tokens", 0), u.get("cache_creation_input_tokens", 0),
+         u.get("cost_usd", 0.0), u.get("num_turns", 0), log_path),
+    )
+
+
+def usage_stats(since_ts):
+    total = _row(
+        """SELECT COUNT(*) wakes, COALESCE(SUM(input_tokens),0) input_tokens,
+           COALESCE(SUM(output_tokens),0) output_tokens, COALESCE(SUM(cache_read),0) cache_read,
+           COALESCE(SUM(cache_creation),0) cache_creation, COALESCE(SUM(cost_usd),0) cost_usd,
+           COALESCE(SUM(num_turns),0) num_turns
+           FROM wakes WHERE started>=?""",
+        (since_ts,),
+    )
+    names = agent_names()
+    per_agent = _rows(
+        """SELECT agent_id, COUNT(*) wakes, COALESCE(SUM(output_tokens),0) output_tokens,
+           COALESCE(SUM(cost_usd),0) cost_usd FROM wakes WHERE started>=?
+           GROUP BY agent_id ORDER BY cost_usd DESC""",
+        (since_ts,),
+    )
+    for r in per_agent:
+        r["name"] = names.get(r["agent_id"], f"agent#{r['agent_id']}")
+    return {"total": total, "per_agent": per_agent}
 
 
 def agent_names():

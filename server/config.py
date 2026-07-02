@@ -8,6 +8,8 @@ LOG_DIR = os.path.join(DATA_DIR, "logs")
 MCP_DIR = os.path.join(DATA_DIR, "mcp")
 WORKSPACES_DIR = os.path.join(BASE_DIR, "workspaces")
 WEB_DIR = os.path.join(BASE_DIR, "web")
+SKILLS_DIR = os.path.join(BASE_DIR, "skills")                       # AgentChat 技能库（按 agent 勾选分发）
+GLOBAL_SKILLS_DIR = os.path.expanduser(os.path.join("~", ".claude", "skills"))  # 全局技能，所有 agent 天生可见
 
 HOST = "127.0.0.1"
 PORT = 8787
@@ -50,5 +52,5 @@ ALLOWED_CHAT_TOOLS = [f"mcp__chat__{t}" for t in CHAT_TOOLS]
 
 
 def ensure_dirs():
-    for d in (DATA_DIR, LOG_DIR, MCP_DIR, WORKSPACES_DIR):
+    for d in (DATA_DIR, LOG_DIR, MCP_DIR, WORKSPACES_DIR, SKILLS_DIR):
         os.makedirs(d, exist_ok=True)

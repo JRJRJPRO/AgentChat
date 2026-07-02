@@ -29,6 +29,7 @@ class Hub:
         self.running = {}        # agent_id -> {"proc":..., "since":..., "stopped":bool}
         self.last_done = {}      # agent_id -> 上次唤醒结束时间（冷却用）
         self.fails = {}          # agent_id -> 连续失败次数
+        self.interrupted = set() # 被打断过、下次唤醒要带"被打断"标注的 agent
         self.chain_notified = set()  # 已经广播过"链长暂停"的会话，避免刷屏
         self.claude = shutil.which("claude")
         self.git_bash = self._find_git_bash()  # Windows 上 claude 需要 git-bash
@@ -59,6 +60,7 @@ class Hub:
         return "working" if aid in self.running else "idle"
 
     async def stop_agent(self, aid):
+        """硬停止：杀进程，这批消息不再重发。"""
         info = self.running.get(aid)
         if info and info.get("proc"):
             info["stopped"] = True
@@ -66,6 +68,19 @@ class Hub:
                 info["proc"].kill()
             except ProcessLookupError:
                 pass
+
+    async def interrupt_agent(self, aid):
+        """软打断：杀进程，但消息回退重发，下次唤醒带"你被打断了"标注，
+        agent 借 --resume 的记忆接着干，不从头重来。"""
+        info = self.running.get(aid)
+        if not (info and info.get("proc")):
+            return False
+        info["interrupt"] = True
+        try:
+            info["proc"].kill()
+        except ProcessLookupError:
+            pass
+        return True
 
     async def chain_clear(self, cid):
         if cid in self.chain_notified:
@@ -133,19 +148,24 @@ class Hub:
 
         first = not agent["bootstrapped"]
         blocks = [prompts.batch_block(b["conv"], b["member_names"], b["msgs"]) for b in pend["batches"]]
-        prompt = prompts.wake_prompt(agent, blocks, first)
+        prompt = prompts.wake_prompt(agent, blocks, first, interrupted=aid in self.interrupted)
+        self.interrupted.discard(aid)
 
         cfg_path = self._write_mcp_config(agent)
         preset = config.PERMISSION_PRESETS.get(agent["permission"], config.PERMISSION_PRESETS["worker"])
         allowed = ",".join(config.ALLOWED_CHAT_TOOLS + preset["extra_allowed"])
 
         cmd = self._claude_cmd() + [
-            "-p", "--output-format", "text",
+            "-p", "--output-format", "json",  # json 里带每次唤醒的 token 用量
             "--model", config.MODEL_IDS.get(agent["model"], agent["model"]),
             "--permission-mode", preset["mode"],
             "--allowedTools", allowed,
             "--mcp-config", cfg_path, "--strict-mcp-config",
         ]
+        for d in (agent.get("extra_dirs") or "").split(","):
+            d = d.strip()
+            if d:
+                cmd += ["--add-dir", d]
         cmd += ["--session-id", agent["session_id"]] if first else ["--resume", agent["session_id"]]
 
         os.makedirs(agent["cwd"], exist_ok=True)
@@ -159,6 +179,7 @@ class Hub:
 
         await self.broadcast({"t": "agent", "id": aid, "run": "working"})
 
+        started = time.time()
         with open(log_path, "w", encoding="utf-8", errors="replace") as f:
             f.write(f"# cmd: {cmd}\n# ---- prompt ----\n{prompt}\n# ---- output ----\n")
             f.flush()
@@ -178,13 +199,25 @@ class Hub:
                 f.write("\n# !! 超时被杀\n")
 
         db.record_wake(aid)
+        db.add_wake(aid, started, rc, self._parse_usage(log_path), log_path)
         stopped = self.running.get(aid, {}).get("stopped")
+        interrupt = self.running.get(aid, {}).get("interrupt")
         if rc == 0:
             self.fails[aid] = 0
             if first:
                 db.update_agent(aid, bootstrapped=1)
         elif stopped:
-            pass  # 用户手动停止：不算失败，也不重发（避免死循环）
+            # 用户硬停止：不算失败，也不重发（避免死循环）
+            if first:
+                db.update_agent(aid, session_id=str(uuid.uuid4()))  # 半截会话作废，防 session-id 冲突
+        elif interrupt:
+            # 软打断：回退游标让消息（连同打断者的新话）合并重发，标注"被打断"
+            for cid, cur in prev.items():
+                db.set_delivered(("agent", aid), cid, cur)
+            self.interrupted.add(aid)
+            self.fails[aid] = 0
+            if first:
+                db.update_agent(aid, session_id=str(uuid.uuid4()))
         else:
             if first:
                 # 首次唤醒失败时会话可能已被占用，换一个新 session id 重来
@@ -207,6 +240,26 @@ class Hub:
             await self.broadcast({"t": "agent", "id": aid, "run": "idle"})
 
     # ---------- 工具 ----------
+
+    @staticmethod
+    def _parse_usage(log_path):
+        """从 claude -p --output-format json 的输出里抠 token 用量。失败就算了，不影响主流程。"""
+        try:
+            with open(log_path, encoding="utf-8", errors="replace") as f:
+                text = f.read()
+            payload = text.split("# ---- output ----\n", 1)[1].strip()
+            data = json.loads(payload[payload.index("{"):])
+            u = data.get("usage") or {}
+            return {
+                "input_tokens": u.get("input_tokens", 0),
+                "output_tokens": u.get("output_tokens", 0),
+                "cache_read_input_tokens": u.get("cache_read_input_tokens", 0),
+                "cache_creation_input_tokens": u.get("cache_creation_input_tokens", 0),
+                "cost_usd": data.get("total_cost_usd", 0.0),
+                "num_turns": data.get("num_turns", 0),
+            }
+        except Exception:
+            return None
 
     def _claude_cmd(self):
         p = self.claude

@@ -12,7 +12,7 @@ from fastapi import FastAPI, Body, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import config, db
+from . import config, db, prompts, skills
 from .hub import Hub
 
 
@@ -61,6 +61,7 @@ def agent_view(a):
         "id": a["id"], "name": a["name"], "cwd": a["cwd"], "model": a["model"],
         "permission": a["permission"], "memo": a["memo"], "status": a["status"],
         "wake_count": a["wake_count"], "last_wake_at": a["last_wake_at"],
+        "extra_dirs": a.get("extra_dirs") or "", "skills": [s for s in (a.get("skills") or "").split(",") if s],
         "run": hub.run_state(a["id"]),
     }
 
@@ -103,9 +104,19 @@ async def api_create_agent(payload: dict = Body(...)):
     perm = payload.get("permission") if payload.get("permission") in config.PERMISSION_PRESETS else config.DEFAULT_PERMISSION
     os.makedirs(cwd, exist_ok=True)
     a = db.create_agent(name, cwd, model, perm, payload.get("memo") or "")
+    if payload.get("extra_dirs") is not None:
+        db.update_agent(a["id"], extra_dirs=_clean_dirs(payload["extra_dirs"]))
+    if payload.get("skills"):
+        applied = skills.sync_agent_skills(a, payload["skills"])
+        db.update_agent(a["id"], skills=",".join(applied))
+    a = db.get_agent(a["id"])
     dm = db.ensure_dm(db.USER, ("agent", a["id"]))
     await ws_manager.broadcast({"t": "convs_changed"})
     return {"agent": agent_view(a), "dm_conv_id": dm["id"]}
+
+
+def _clean_dirs(raw):
+    return ",".join(d.strip() for d in (raw or "").replace("；", ",").replace("，", ",").split(",") if d.strip())
 
 
 @app.post("/api/agents/{aid}/update")
@@ -120,6 +131,11 @@ async def api_update_agent(aid: int, payload: dict = Body(...)):
         kw["memo"] = payload["memo"] or ""
     if payload.get("cwd"):
         kw["cwd"] = payload["cwd"]
+    if "extra_dirs" in payload:
+        kw["extra_dirs"] = _clean_dirs(payload["extra_dirs"])
+    if "skills" in payload:
+        applied = skills.sync_agent_skills(a, payload["skills"] or [])
+        kw["skills"] = ",".join(applied)
     db.update_agent(aid, **kw)
     await ws_manager.broadcast({"t": "convs_changed"})
     return {"agent": agent_view(db.get_agent(aid))}
@@ -142,6 +158,45 @@ async def api_agent_status(aid: int, payload: dict = Body(...)):
 @app.post("/api/agents/{aid}/stop")
 async def api_agent_stop(aid: int):
     await hub.stop_agent(aid)
+    return {"ok": True}
+
+
+@app.post("/api/agents/{aid}/interrupt")
+async def api_agent_interrupt(aid: int):
+    ok = await hub.interrupt_agent(aid)
+    return {"ok": ok}
+
+
+@app.get("/api/skills")
+async def api_skills():
+    return {
+        "library": skills.list_library(),
+        "global": skills.list_global(),
+        "library_dir": config.SKILLS_DIR,
+        "global_dir": config.GLOBAL_SKILLS_DIR,
+    }
+
+
+@app.post("/api/open_folder")
+async def api_open_folder(payload: dict = Body(...)):
+    # 只允许打开这两个技能目录，别的路径不开（本地工具，防手滑）
+    path = payload.get("path") or ""
+    if path not in (config.SKILLS_DIR, config.GLOBAL_SKILLS_DIR):
+        err("只允许打开技能目录")
+    os.makedirs(path, exist_ok=True)
+    os.startfile(path)
+    return {"ok": True}
+
+
+@app.get("/api/stats")
+async def api_stats(hours: float = 5):
+    return db.usage_stats(time.time() - hours * 3600)
+
+
+@app.post("/api/shutdown")
+async def api_shutdown():
+    import asyncio
+    asyncio.get_event_loop().call_later(0.3, os._exit, 0)
     return {"ok": True}
 
 
@@ -379,6 +434,21 @@ async def _tool_dispatch(agent, tool, args):
     raise ToolError(f"未知工具: {tool}")
 
 
+def _piggyback(agent):
+    """agent 正在干活时到达的消息，搭工具返回值的便车送进它的上下文。
+
+    这就是"中途补充指令"的实现：不用打断进程、零额外唤醒成本，
+    agent 下一次碰任何聊天工具就能看到你的新话。"""
+    pend = db.agent_pending(agent)
+    if not pend["batches"]:
+        return ""
+    blocks = []
+    for b in pend["batches"]:
+        db.set_delivered(("agent", agent["id"]), b["conv"]["id"], b["msgs"][-1]["id"])
+        blocks.append(prompts.batch_block(b["conv"], b["member_names"], b["msgs"]))
+    return prompts.piggyback_block(blocks)
+
+
 @app.post("/internal/tool")
 async def internal_tool(payload: dict = Body(...)):
     agent = db.get_agent_by_token(payload.get("token") or "")
@@ -386,6 +456,11 @@ async def internal_tool(payload: dict = Body(...)):
         return JSONResponse({"ok": False, "error": "无效的 agent token"})
     try:
         result = await _tool_dispatch(agent, payload.get("tool"), payload.get("args") or {})
+        extra = _piggyback(agent)
+        if extra:
+            if not isinstance(result, str):
+                result = json.dumps(result, ensure_ascii=False, indent=1)
+            result += extra
         return JSONResponse({"ok": True, "result": result})
     except ToolError as e:
         return JSONResponse({"ok": False, "error": str(e)})

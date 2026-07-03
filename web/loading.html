@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>AgentChat 启动中…</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%232e5c46'/%3E%3Ctext x='50' y='68' font-size='52' text-anchor='middle' fill='%23e6f4ec' font-family='sans-serif'%3E%E7%BE%A4%3C/text%3E%3C/svg%3E">
+<style>
+  body {
+    margin: 0; height: 100vh; display: flex; align-items: center; justify-content: center;
+    background: #0f1115; color: #e8eaed;
+    font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  }
+  .box { text-align: center; max-width: 420px; padding: 24px; }
+  .spinner {
+    width: 44px; height: 44px; margin: 0 auto 22px;
+    border: 4px solid #2a3040; border-top-color: #3ba55d; border-radius: 50%;
+    animation: spin 0.9s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  h1 { font-size: 19px; margin: 0 0 10px; }
+  p { color: #9aa3b2; font-size: 13px; line-height: 1.8; margin: 0; }
+  code { background: #1d212b; border-radius: 5px; padding: 2px 6px; font-size: 12px; }
+  .hidden { display: none; }
+  #err { color: #e5484d; }
+</style>
+</head>
+<body>
+<div class="box">
+  <div class="spinner" id="spin"></div>
+  <h1 id="title">AgentChat 正在启动…</h1>
+  <p id="tip">通常只要几秒；刚开机后的第一次会慢一些（10~20 秒），就绪后自动进入聊天界面</p>
+  <p id="err" class="hidden">启动超时（等了 60 秒）。请检查日志 <code>data\server.log</code><br>
+     常见原因：依赖损坏（删掉 .venv 重新双击）、端口被占用、代码被改坏（git diff 查看）</p>
+</div>
+<script>
+  const APP = "http://127.0.0.1:8787";
+  const t0 = Date.now();
+  async function poll() {
+    try {
+      // no-cors：连接成功即 resolve（连不上才 throw），file:// 页面也能探测
+      await fetch(APP + "/api/state", { mode: "no-cors", cache: "no-store" });
+      location.replace(APP);
+      return;
+    } catch (e) { /* 还没就绪 */ }
+    if (Date.now() - t0 > 60000) {
+      document.getElementById("spin").classList.add("hidden");
+      document.getElementById("tip").classList.add("hidden");
+      document.getElementById("title").textContent = "启动失败";
+      document.getElementById("err").classList.remove("hidden");
+      return;
+    }
+    setTimeout(poll, 700);
+  }
+  poll();
+</script>
+</body>
+</html>

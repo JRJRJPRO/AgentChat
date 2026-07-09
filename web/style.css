@@ -314,6 +314,38 @@ body.light .file-att { background: rgba(20,30,50,.05); }
   background: var(--accent); color: #fff; border: none; border-radius: 8px;
   padding: 6px 14px; cursor: pointer; font-size: 12px;
 }
+.ask-card .ask-timer { float: right; font-weight: 400; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.ask-card .ask-timer.urgent { color: var(--danger, #e5534b); font-weight: 700; }
+
+/* 提问浮层：悬在主聊天区（侧栏 300px 之外）正中央；多个提问竖排可滚动 */
+#askOverlay {
+  position: fixed; z-index: 320; top: 50%; left: calc(50% + 150px);
+  transform: translate(-50%, -50%);
+  width: min(520px, calc(100vw - 340px));
+  max-height: 76vh; display: flex; flex-direction: column; gap: 10px;
+}
+#askHead {
+  display: flex; align-items: center; justify-content: space-between;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+  padding: 6px 12px; font-size: 13px; font-weight: 600;
+  box-shadow: 0 10px 30px rgba(0,0,0,.5);
+}
+#askCollapse {
+  background: none; border: 1px solid var(--border); color: var(--muted);
+  border-radius: 8px; padding: 3px 10px; cursor: pointer; font-size: 12px;
+}
+#askCollapse:hover { border-color: var(--accent); color: var(--text); }
+#askList { display: flex; flex-direction: column; gap: 10px; overflow-y: auto; }
+
+/* 收起后的小徽标：主聊天区底部居中，点击重新展开 */
+#askBadge {
+  position: fixed; z-index: 320; bottom: 90px; left: calc(50% + 150px);
+  transform: translateX(-50%);
+  background: var(--panel); border: 1px solid var(--accent); color: var(--text);
+  border-radius: 999px; padding: 8px 16px; cursor: pointer; font-size: 13px; font-weight: 600;
+  box-shadow: 0 10px 30px rgba(0,0,0,.5);
+}
+#askBadge:hover { background: var(--hover); }
 
 #composer {
   display: flex; gap: 10px; padding: 12px 16px; border-top: 1px solid var(--border);

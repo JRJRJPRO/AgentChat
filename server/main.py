@@ -435,7 +435,9 @@ async def _handle_ask_user(agent, args):
     _ask_seq += 1
     rid = _ask_seq
     info = {"id": rid, "agent_id": agent["id"], "agent": agent["name"],
-            "question": question[:600], "options": options}
+            "question": question[:600], "options": options,
+            # 截止时刻，前端画倒计时用；超时后 agent 按自己判断继续
+            "expires_at": time.time() + config.ASK_USER_TIMEOUT}
     fut = asyncio.get_event_loop().create_future()
     _ask_reqs[rid] = {"future": fut, "info": info}
     await ws_manager.broadcast({"t": "ask", "req": info})
@@ -445,7 +447,8 @@ async def _handle_ask_user(agent, args):
         answer = None
     finally:
         _ask_reqs.pop(rid, None)
-        await ws_manager.broadcast({"t": "ask_done", "id": rid})
+        await ws_manager.broadcast({"t": "ask_done", "id": rid, "agent": agent["name"],
+                                    "reason": "answered" if answer else "timeout"})
     if answer is None:
         return f"{config.USER_NAME} 暂时没有回答（可能不在电脑前）。按你的最佳判断继续，必要时在聊天里留言说明你选了什么、为什么。"
     return f"{config.USER_NAME} 的回答：{answer}"

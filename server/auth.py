@@ -32,11 +32,20 @@ _AUTH_PATTERNS = [
 _AUTH_RE = re.compile("|".join(_AUTH_PATTERNS), re.IGNORECASE)
 
 
-def find_auth_error(text):
-    """在日志文本里找登录问题的证据；找到返回附近的片段（给界面显示），否则 None。"""
+# 订阅用量打满（429）同样不是 agent 的锅：全局挂起等重置，别记失败
+# 典型文案："You've hit your session limit · resets 6:50pm (Australia/Sydney)"
+# 按优先级排：人话文案在前（带重置时间，适合直接给用户看），裸 JSON 事件行兜底
+_LIMIT_RES = [re.compile(p, re.IGNORECASE) for p in (
+    r"hit your \w+ limit",
+    r"usage limit (reached|exceeded)",
+    r"rate.?limit(ed)?",
+)]
+
+
+def _find_snippet(regex, text):
     if not text:
         return None
-    m = _AUTH_RE.search(text)
+    m = regex.search(text)
     if not m:
         return None
     line_start = text.rfind("\n", 0, m.start()) + 1
@@ -44,6 +53,20 @@ def find_auth_error(text):
     if line_end == -1:
         line_end = len(text)
     return text[line_start:line_end].strip()[:300]
+
+
+def find_auth_error(text):
+    """在日志文本里找登录问题的证据；找到返回附近的片段（给界面显示），否则 None。"""
+    return _find_snippet(_AUTH_RE, text)
+
+
+def find_limit_error(text):
+    """在日志文本里找"订阅用量打满"的证据，片段里通常带重置时间。"""
+    for regex in _LIMIT_RES:
+        snippet = _find_snippet(regex, text)
+        if snippet:
+            return snippet
+    return None
 
 
 def credentials_status():

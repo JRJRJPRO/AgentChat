@@ -589,8 +589,8 @@ function connectWS() {
     } else if (d.t === "ask") {
       addAskCard(d.req);
     } else if (d.t === "ask_done") {
-      const card = $("ask" + d.id);
-      if (card) card.remove();
+      removeAskCard(d.id);
+      if (d.reason === "timeout") toast(`${d.agent || ""}: ${t("ask_timeout")}`, 1);
     } else if (d.t === "chain") {
       const c = S.convs.find((x) => x.id === d.conv_id);
       if (c && c.chain) c.chain.paused = d.paused;
@@ -1115,8 +1115,9 @@ function addAskCard(r) {
   const card = document.createElement("div");
   card.className = "ask-card";
   card.id = "ask" + r.id;
+  card.dataset.exp = r.expires_at || Date.now() / 1000 + 600;  // 兜底：老服务器没给截止时刻
   card.innerHTML =
-    `<div class="p-title">💬 ${esc(r.agent)} · ${esc(t("ask_title"))}</div>` +
+    `<div class="p-title"><span class="ask-timer"></span>💬 ${esc(r.agent)} · ${esc(t("ask_title"))}</div>` +
     `<div class="ask-q">${esc(r.question)}</div>` +
     `<div class="ask-opts">` +
     r.options.map((o, i) => `<button class="ask-opt" data-i="${i}">${esc(o)}</button>`).join("") +
@@ -1129,14 +1130,50 @@ function addAskCard(r) {
   const send = () => { if (inp.value.trim()) answerAsk(r.id, inp.value.trim()); };
   card.querySelector(".ask-custom button").onclick = send;
   inp.addEventListener("keydown", (e) => { if (e.key === "Enter") send(); });
-  $("permPanel").appendChild(card);
+  $("askList").appendChild(card);
+  S.askCollapsed = false;  // 新提问来了自动展开，别让人错过
+  renderAskOverlay();
   notify(0, `${r.agent} ${t("ask_title")}`, r.question);
+}
+
+function removeAskCard(id) {
+  const card = $("ask" + id);
+  if (card) card.remove();
+  renderAskOverlay();
 }
 
 async function answerAsk(rid, answer) {
   try { await api(`/api/asks/${rid}/answer`, { answer }); } catch (e) { toast(e.message, 1); }
-  const card = $("ask" + rid);
-  if (card) card.remove();
+  removeAskCard(rid);
+}
+
+// 浮层随卡片数量显隐：0 个全藏；收起时只留底部小徽标
+let askTick = null;
+function renderAskOverlay() {
+  const n = $("askList").children.length;
+  const ov = $("askOverlay"), badge = $("askBadge");
+  if (!n) {
+    ov.classList.add("hidden");
+    badge.classList.add("hidden");
+    clearInterval(askTick); askTick = null;
+    return;
+  }
+  $("askCount").textContent = t("ask_pending_n").replace("{n}", n);
+  $("askCollapse").textContent = t("ask_collapse");
+  badge.textContent = `💬 ${n}`;
+  ov.classList.toggle("hidden", !!S.askCollapsed);
+  badge.classList.toggle("hidden", !S.askCollapsed);
+  updateAskTimers();
+  if (!askTick) askTick = setInterval(updateAskTimers, 1000);
+}
+
+function updateAskTimers() {
+  document.querySelectorAll("#askList .ask-card").forEach((c) => {
+    const left = Math.max(0, Math.round(+c.dataset.exp - Date.now() / 1000));
+    const el = c.querySelector(".ask-timer");
+    el.textContent = `⏳ ${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}`;
+    el.classList.toggle("urgent", left < 60);
+  });
 }
 
 async function loadPendingAsks() {
@@ -1151,8 +1188,11 @@ async function loadPendingAsks() {
 function renderAuthBar() {
   const bar = $("authBar");
   if (!S.auth) return bar.classList.add("hidden");
-  $("authText").textContent = `⚠ ${t("auth_needed")}` +
+  const limit = S.auth.kind === "limit";  // 订阅用量打满：不用重新登录，等重置后重试即可
+  $("authText").textContent = `⚠ ${t(limit ? "limit_needed" : "auth_needed")}` +
     (S.auth.agent ? `（${S.auth.agent}: ${S.auth.detail || ""}）` : "");
+  $("btnAuthLogin").classList.toggle("hidden", limit);
+  $("btnAuthRetry").textContent = limit ? t("retry") : t("auth_retry");
   bar.classList.remove("hidden");
 }
 
@@ -1237,6 +1277,10 @@ function bind() {
   $("btnAuthRetry").onclick = async () => {
     try { await api("/api/auth/clear", {}); } catch (e) { toast(e.message, 1); }
   };
+
+  // 提问浮层：收起成小徽标 / 点徽标展开
+  $("askCollapse").onclick = () => { S.askCollapsed = true; renderAskOverlay(); };
+  $("askBadge").onclick = () => { S.askCollapsed = false; renderAskOverlay(); };
 
   // 附件：📎按钮 / 拖拽 / 粘贴
   $("btnAttach").onclick = () => $("fileInput").click();

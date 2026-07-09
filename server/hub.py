@@ -246,19 +246,25 @@ class Hub:
         stopped = self.running.get(aid, {}).get("stopped")
         interrupt = self.running.get(aid, {}).get("interrupt")
 
-        # 先判登录问题：claude -p 遇到 OAuth 过期只会报错退出，这不是 agent 的锅，
-        # 不该记失败/自动暂停，而是全局挂起并引导用户在界面里重新登录
-        auth_err = None
+        # 先判"不是 agent 的锅"的失败：OAuth 过期 / 订阅用量打满（429）。
+        # 这两种都不该记失败/自动暂停，而是全局挂起：消息排队不丢，
+        # 顶栏提示用户（前者引导重新登录，后者显示重置时间等恢复后点重试）
+        auth_err = limit_err = None
         if not stopped and not interrupt and (rc != 0 or result_evt.get("is_error")):
             tail = (str(result_evt.get("result") or "")) + "\n" + self._log_tail(log_path)
             auth_err = auth.find_auth_error(tail)
+            if not auth_err:
+                limit_err = auth.find_limit_error(tail)
+                if not limit_err and result_evt.get("api_error_status") == 429:
+                    limit_err = str(result_evt.get("result") or "").strip()[:300] or "usage limit (429)"
 
-        if auth_err:
+        if auth_err or limit_err:
             for cid, cur in prev.items():
-                db.set_delivered(("agent", aid), cid, cur)  # 消息回队，登录后重发
+                db.set_delivered(("agent", aid), cid, cur)  # 消息回队，恢复后重发
             if first and rc != 0:
                 db.update_agent(aid, session_id=str(uuid.uuid4()))
-            self.auth_needed = {"agent": agent["name"], "detail": auth_err, "ts": time.time()}
+            self.auth_needed = {"kind": "auth" if auth_err else "limit",
+                                "agent": agent["name"], "detail": auth_err or limit_err, "ts": time.time()}
             await self.broadcast({"t": "auth", "needed": True, **self.auth_needed})
         elif rc == 0:
             self.fails[aid] = 0

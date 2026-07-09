@@ -326,6 +326,23 @@ async def api_library_new_pack(payload: dict = Body(...)):
     return {"ok": True}
 
 
+@app.post("/api/library/split")
+async def api_library_split(payload: dict = Body(...)):
+    """把记忆包里勾选的条目拆成新包（只支持 memories；skills 是共享链接不适用）。"""
+    if payload.get("kind") != "memories":
+        err("只有记忆包支持拆分")
+    pack = payload.get("pack") or ""
+    new_name = (payload.get("new_name") or "").strip()
+    _lib_path("memories", pack)       # 复用非法字符/越界校验
+    _lib_path("memories", new_name)
+    try:
+        out = memories.split_pack(pack, payload.get("files") or [],
+                                  new_name, payload.get("description") or "")
+    except ValueError as e:
+        err(str(e))
+    return {"ok": True, **out}
+
+
 @app.post("/api/library/new_file")
 async def api_library_new_file(payload: dict = Body(...)):
     name = (payload.get("name") or "").strip()

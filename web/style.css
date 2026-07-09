@@ -485,6 +485,8 @@ body.light .file-att { background: rgba(20,30,50,.05); }
 }
 .file-chip:hover { background: var(--hover); color: var(--text); }
 .file-chip.active { color: var(--text); border-color: var(--accent); }
+.file-chip.selected { color: var(--text); border-color: var(--accent); background: rgba(79,156,249,.15); }
+.file-chip.dim { opacity: .4; cursor: default; }
 #libEditorWrap { flex: 1; display: flex; padding: 12px 18px; min-height: 0; }
 #libEditor {
   flex: 1; background: var(--panel2); border: 1px solid var(--border); color: var(--text);

@@ -48,6 +48,43 @@ def list_library():
     return out
 
 
+def split_pack(pack, files, new_name, description=""):
+    """把一个记忆包里勾选的若干条目拆出去成新包（John 的渐进式拆分：一次拆 2-4 个，
+    不够以后对子包再拆）。移动 .md 文件本体 + MEMORY.md 里对应的索引行；
+    索引里的相对链接是同目录的，跟着文件一起搬所以不会断。
+    源包保留剩余条目；已分发到各 agent 的旧副本不动（John 拍板：后续分发用新的即可）。"""
+    src = os.path.join(config.MEMORIES_DIR, pack)
+    dst = os.path.join(config.MEMORIES_DIR, new_name)
+    if not os.path.isfile(os.path.join(src, "MEMORY.md")):
+        raise ValueError("源包不存在")
+    if os.path.exists(dst):
+        raise ValueError("已存在同名包")
+    files = [f for f in files if f.lower().endswith(".md") and f != "MEMORY.md"
+             and os.path.isfile(os.path.join(src, f))]
+    if not files:
+        raise ValueError("没有可拆的条目")
+
+    with open(os.path.join(src, "MEMORY.md"), encoding="utf-8", errors="replace") as f:
+        src_lines = f.read().splitlines()
+    moved_idx, kept = [], []
+    for line in src_lines:
+        # 索引行里 "](文件名)" 命中任一要搬的文件就跟着走
+        if any(f"]({fn})" in line for fn in files):
+            moved_idx.append(line)
+        else:
+            kept.append(line)
+
+    os.makedirs(dst)
+    for fn in files:
+        shutil.move(os.path.join(src, fn), os.path.join(dst, fn))
+    head = (description or "").strip() or f"从「{pack}」拆出的记忆包"
+    with open(os.path.join(dst, "MEMORY.md"), "w", encoding="utf-8") as f:
+        f.write(head + "\n\n" + "\n".join(moved_idx) + ("\n" if moved_idx else ""))
+    with open(os.path.join(src, "MEMORY.md"), "w", encoding="utf-8") as f:
+        f.write("\n".join(kept).rstrip("\n") + "\n")
+    return {"moved": len(files), "new_pack": new_name}
+
+
 def ensure_claude_md(agent):
     """agent 的两级长期记忆：工作目录 CLAUDE.md（私有）+ @导入 shared/TEAM.md（全员共享）。
     CLAUDE.md 每次启动必定全文进上下文（无头模式也是），比 memory 目录可靠。

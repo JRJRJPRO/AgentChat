@@ -247,7 +247,7 @@ function saveDraft(cid) {
 async function openConv(cid) {
   if (S.lib && !libConfirmDiscard()) return;
   if (S.cur && S.cur.id !== cid) saveDraft(S.cur.id);
-  S.lib = null; S.libFile = null; S.libDirty = false;
+  S.lib = null; S.libFile = null; S.libDirty = false; S.libSplit = null;
   $("lib").classList.add("hidden");
   const d = await api(`/api/convs/${cid}`);
   S.cur = d.conv;
@@ -717,8 +717,10 @@ async function renderMemChecks(rootId, checkedNames) {
       const line = document.createElement("label");
       line.className = "check-line";
       const on = checkedNames.includes(m.name) ? "checked" : "";
+      const n = Math.max(0, (m.files || []).length - 1);  // 除去 MEMORY.md 的条目数，一眼看出哪个包太肥
       line.innerHTML = `<input type="checkbox" value="${esc(m.name)}" ${on}>` +
-        `<span><b>${esc(m.name)}</b>${m.description ? " — " + esc(m.description.slice(0, 60)) : ""}</span>`;
+        `<span><b>${esc(m.name)}</b>（${n}${esc(t("entries_n"))}）` +
+        `${m.description ? " — " + esc(m.description.slice(0, 60)) : ""}</span>`;
       root.appendChild(line);
     }
     root.insertAdjacentHTML("afterend", `<div class="skill-note">${esc(t("memories_hint"))}</div>`);
@@ -937,6 +939,7 @@ async function openLibPack(kind, pack) {
   S.lib = { kind, pack };
   S.libFile = null;
   S.libDirty = false;
+  S.libSplit = null;
   S.cur = null;
   $("empty").classList.add("hidden");
   $("chat").classList.add("hidden");
@@ -959,15 +962,58 @@ function renderLibView() {
   box.innerHTML = "";
   for (const f of (info ? info.files : [])) {
     const chip = document.createElement("button");
-    chip.className = "file-chip" + (f === S.libFile ? " active" : "");
+    if (S.libSplit) {  // 拆分模式：点条目是勾选，MEMORY.md（索引本体）不能拆走
+      const pickable = f !== "MEMORY.md";
+      chip.className = "file-chip" + (S.libSplit.has(f) ? " selected" : "") + (pickable ? "" : " dim");
+      chip.onclick = () => {
+        if (!pickable) return;
+        S.libSplit.has(f) ? S.libSplit.delete(f) : S.libSplit.add(f);
+        renderLibView();
+      };
+    } else {
+      chip.className = "file-chip" + (f === S.libFile ? " active" : "");
+      chip.onclick = () => openLibFile(f);
+    }
     chip.textContent = f;
-    chip.onclick = () => openLibFile(f);
     box.appendChild(chip);
   }
-  if (!S.libFile) {
+  const sp = $("libSplit");
+  sp.classList.toggle("hidden", !(S.lib && S.lib.kind === "memories"));
+  sp.textContent = !S.libSplit ? t("split_pack")
+    : (S.libSplit.size ? t("split_out").replace("{n}", S.libSplit.size) : t("split_cancel"));
+  if (S.libSplit) $("libStatus").textContent = t("split_hint");
+  else if (!S.libFile) {
     $("libEditor").value = "";
     $("libStatus").textContent = t("select_file");
   }
+}
+
+async function libSplitClick() {
+  if (!S.libSplit) {              // 进入拆分模式
+    S.libSplit = new Set();
+    renderLibView();
+    return;
+  }
+  if (!S.libSplit.size) {         // 空选再点一次 = 取消
+    S.libSplit = null;
+    renderLibView();
+    return;
+  }
+  const name = (prompt(t("split_name_prompt")) || "").trim();
+  if (!name) return;
+  const desc = (prompt(t("split_desc_prompt")) || "").trim();
+  try {
+    await api("/api/library/split", {
+      kind: "memories", pack: S.lib.pack, files: [...S.libSplit],
+      new_name: name, description: desc,
+    });
+    S.libSplit = null;
+    S.libFile = null;
+    S.memsInfo = null;            // 勾选列表缓存失效
+    await loadLibrary();
+    openLibPack("memories", name);
+    toast(t("split_done"));
+  } catch (e) { toast(e.message, 1); }
 }
 
 async function openLibFile(f, force) {
@@ -1276,6 +1322,7 @@ function bind() {
 
   $("libSave").onclick = saveLibFile;
   $("libNewFile").onclick = newLibFile;
+  $("libSplit").onclick = libSplitClick;
   $("libEditor").addEventListener("input", () => {
     S.libDirty = true;
     $("libStatus").textContent = t("unsaved");

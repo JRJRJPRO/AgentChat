@@ -8,6 +8,12 @@
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
+<!-- Claude 登录失效提示条（全局，检测到唤醒因鉴权失败时出现） -->
+<div id="authBar" class="hidden">
+  <span id="authText"></span>
+  <button id="btnAuthLogin" data-i18n="auth_login">打开登录窗口</button>
+  <button id="btnAuthRetry" data-i18n="auth_retry">已登录，重试</button>
+</div>
 <div id="app">
   <!-- ============ 左侧栏 ============ -->
   <aside id="sidebar">
@@ -26,10 +32,12 @@
       <button class="tab active" data-tab="chats" data-i18n="tab_chats">聊天</button>
       <button class="tab" data-tab="agents" data-i18n="tab_agents">Agent</button>
       <button class="tab" data-tab="discover" data-i18n="tab_discover">发现</button>
+      <button class="tab" data-tab="library" data-i18n="tab_library">资源库</button>
     </nav>
     <div id="listChats" class="list"></div>
     <div id="listAgents" class="list hidden"></div>
     <div id="listDiscover" class="list hidden"></div>
+    <div id="listLibrary" class="list hidden"></div>
   </aside>
 
   <!-- ============ 主区域 ============ -->
@@ -48,14 +56,37 @@
       </header>
       <div id="banner" class="hidden"></div>
       <div id="msgs"></div>
+      <!-- 过程动态：agent 正在想什么/用什么工具（只展示，不进聊天记录） -->
+      <div id="actFeed" class="hidden"></div>
       <div id="typing" class="hidden"></div>
+      <!-- 待发送附件条 -->
+      <div id="attachBar" class="hidden"></div>
       <div id="composer">
+        <button id="btnAttach" class="icon-btn" title="添加图片/文件">📎</button>
+        <input type="file" id="fileInput" multiple class="hidden">
         <textarea id="input" rows="1" data-i18n-ph="input_ph" placeholder="输入消息，Enter 发送，Shift+Enter 换行"></textarea>
         <button id="btnSend" data-i18n="send">发送</button>
       </div>
+      <div id="dropHint" class="hidden"><span data-i18n="drop_hint">松开以添加附件</span></div>
       <div id="spectateBar" class="hidden">
         <span data-i18n="spectating">你不在此会话中，正在旁观</span>
         <button id="btnJoin" data-i18n="join">加入</button>
+      </div>
+    </div>
+    <!-- 资源库编辑器 -->
+    <div id="lib" class="hidden">
+      <header id="libHead">
+        <div class="head-info">
+          <div id="libTitle" class="title"></div>
+          <div id="libSub" class="sub"></div>
+        </div>
+        <button id="libNewFile" class="mini-btn" data-i18n="new_file">＋ 文件</button>
+      </header>
+      <div id="libFiles"></div>
+      <div id="libEditorWrap"><textarea id="libEditor" spellcheck="false"></textarea></div>
+      <div id="libBar">
+        <span id="libStatus"></span>
+        <button id="libSave" class="btn-primary" data-i18n="save">保存</button>
       </div>
     </div>
   </main>
@@ -76,6 +107,8 @@
     <label><span data-i18n="f_memo">备注</span><input id="agMemo" data-i18n-ph="memo_ph" placeholder="给自己看的一句话说明（职责在私聊里告诉它）"></label>
     <div class="sect" data-i18n="f_skills">技能</div>
     <div id="agSkills" class="check-list"></div>
+    <div class="sect" data-i18n="f_memories">记忆</div>
+    <div id="agMems" class="check-list"></div>
     <div class="modal-btns">
       <button class="btn-ghost" data-close data-i18n="cancel">取消</button>
       <button class="btn-primary" id="agCreate" data-i18n="create">创建</button>
@@ -93,6 +126,8 @@
     <label><span data-i18n="f_memo">备注</span><input id="aeMemo"></label>
     <div class="sect" data-i18n="f_skills">技能</div>
     <div id="aeSkills" class="check-list"></div>
+    <div class="sect" data-i18n="f_memories">记忆</div>
+    <div id="aeMems" class="check-list"></div>
     <div class="hint" id="aeInfo"></div>
     <div class="modal-btns">
       <button class="btn-ghost" data-close data-i18n="cancel">取消</button>

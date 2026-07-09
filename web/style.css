@@ -91,6 +91,11 @@ body {
   font-weight: 700; font-size: 17px; color: #fff; position: relative;
 }
 .avatar.small { width: 30px; height: 30px; min-width: 30px; border-radius: 8px; font-size: 13px; }
+/* 人（agent/用户/私聊）= 圆形；群聊保持圆角方形，一眼区分 */
+.avatar.round { border-radius: 50%; }
+/* 已归档：灰度头像 */
+.avatar.archived { filter: grayscale(1); opacity: .55; }
+.agent-card.archived .a-name, .agent-card.archived .a-sub { color: var(--muted); }
 .dot {
   position: absolute; right: -2px; bottom: -2px; width: 11px; height: 11px;
   border-radius: 50%; border: 2px solid var(--panel);
@@ -229,6 +234,87 @@ body {
 
 #typing { padding: 4px 20px 8px; color: var(--muted); font-size: 12px; font-style: italic; }
 
+/* ============ 过程动态（agent 在想什么/干什么，不进聊天记录） ============ */
+#actFeed {
+  margin: 0 20px 4px; padding: 8px 12px; max-height: 150px; overflow-y: auto;
+  background: var(--panel); border: 1px solid var(--border); border-left: 3px solid var(--yellow);
+  border-radius: 10px; font-size: 12px; color: var(--muted);
+}
+.act-head { font-weight: 600; color: var(--text); font-size: 11px; margin-bottom: 4px; opacity: .8; }
+.act-line { display: flex; gap: 6px; padding: 2px 0; line-height: 1.5; }
+.act-line .a-tool { color: var(--accent); white-space: nowrap; }
+.act-line .a-note { color: var(--muted); font-style: italic; }
+.act-line .a-detail {
+  color: var(--muted); font-family: Consolas, monospace; font-size: 11px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
+}
+
+/* ============ Claude 登录失效提示条 ============ */
+#authBar {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 400;
+  display: flex; align-items: center; justify-content: center; gap: 14px;
+  background: #5c1f22; color: #ffd9db; padding: 9px 20px; font-size: 13px;
+  border-bottom: 1px solid var(--red); box-shadow: 0 4px 16px rgba(0,0,0,.4);
+}
+body.light #authBar { background: #ffe3e4; color: #7a1a1e; }
+#authBar button {
+  background: transparent; border: 1px solid currentColor; color: inherit;
+  border-radius: 6px; padding: 4px 12px; cursor: pointer; font-size: 12px;
+}
+#authBar button:hover { filter: brightness(1.2); }
+
+/* ============ 附件 ============ */
+#attachBar {
+  display: flex; gap: 8px; flex-wrap: wrap; padding: 8px 16px 0;
+  background: var(--panel); border-top: 1px solid var(--border);
+}
+.att-chip {
+  display: flex; align-items: center; gap: 6px; background: var(--panel2);
+  border: 1px solid var(--border); border-radius: 8px; padding: 4px 8px; font-size: 12px;
+  max-width: 260px;
+}
+.att-chip img { width: 28px; height: 28px; object-fit: cover; border-radius: 5px; }
+.att-chip .att-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.att-chip .att-x { cursor: pointer; color: var(--muted); padding: 0 3px; font-size: 14px; }
+.att-chip .att-x:hover { color: var(--red); }
+.msg-img { max-width: 320px; max-height: 240px; border-radius: 8px; display: block; margin: 4px 0; cursor: zoom-in; }
+.file-att {
+  display: inline-flex; align-items: center; gap: 6px; margin: 4px 0;
+  background: rgba(0,0,0,.2); border: 1px solid var(--border); border-radius: 8px;
+  padding: 6px 10px; font-size: 12px; color: var(--accent) !important; text-decoration: none;
+}
+body.light .file-att { background: rgba(20,30,50,.05); }
+#btnAttach { min-width: 32px; }
+#dropHint {
+  position: absolute; inset: 0; z-index: 60; display: flex; align-items: center; justify-content: center;
+  background: rgba(79,156,249,.12); border: 2px dashed var(--accent); border-radius: 12px;
+  color: var(--accent); font-size: 16px; font-weight: 600; pointer-events: none;
+}
+#chat { position: relative; }
+
+/* ============ agent 提问选择卡 ============ */
+.ask-card {
+  background: var(--panel); border: 1px solid var(--accent); border-radius: 12px;
+  padding: 14px; box-shadow: 0 10px 30px rgba(0,0,0,.5); font-size: 13px;
+}
+.ask-card .p-title { font-weight: 700; margin-bottom: 6px; }
+.ask-card .ask-q { margin: 6px 0 10px; line-height: 1.5; white-space: pre-wrap; }
+.ask-card .ask-opts { display: flex; flex-direction: column; gap: 6px; }
+.ask-card .ask-opt {
+  background: var(--panel2); border: 1px solid var(--border); color: var(--text);
+  border-radius: 8px; padding: 7px 12px; cursor: pointer; text-align: left; font-size: 13px;
+}
+.ask-card .ask-opt:hover { border-color: var(--accent); background: var(--hover); }
+.ask-card .ask-custom { display: flex; gap: 6px; margin-top: 8px; }
+.ask-card .ask-custom input {
+  flex: 1; background: var(--panel2); border: 1px solid var(--border); color: var(--text);
+  border-radius: 8px; padding: 6px 10px; font-size: 12px; outline: none;
+}
+.ask-card .ask-custom button {
+  background: var(--accent); color: #fff; border: none; border-radius: 8px;
+  padding: 6px 14px; cursor: pointer; font-size: 12px;
+}
+
 #composer {
   display: flex; gap: 10px; padding: 12px 16px; border-top: 1px solid var(--border);
   background: var(--panel); align-items: flex-end;
@@ -329,3 +415,48 @@ body {
 ::-webkit-scrollbar { width: 8px; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
 ::-webkit-scrollbar-track { background: transparent; }
+
+/* ============ 资源库 ============ */
+.lib-note { color: var(--muted); font-size: 12px; padding: 8px 10px 4px; line-height: 1.5; }
+.lib-sect {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 8px 6px; color: var(--muted); font-size: 12px; font-weight: 600;
+}
+.lib-item { padding: 10px; border-radius: 10px; cursor: pointer; }
+.lib-item:hover { background: var(--hover); }
+.lib-item.active { background: var(--panel2); }
+.lib-name { font-weight: 600; }
+.lib-desc {
+  color: var(--muted); font-size: 12px; margin-top: 2px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.lib-used { color: var(--muted); font-size: 11px; margin-top: 3px; }
+.lib-used .in-use { color: var(--green); }
+
+#lib { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+#libHead {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 18px; border-bottom: 1px solid var(--border); background: var(--panel);
+}
+#libHead .title { font-weight: 700; font-size: 15px; }
+#libHead .sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
+#libFiles { display: flex; gap: 6px; padding: 10px 18px 0; flex-wrap: wrap; }
+.file-chip {
+  background: var(--panel2); border: 1px solid var(--border); color: var(--muted);
+  border-radius: 7px; padding: 4px 12px; font-size: 12px; cursor: pointer;
+  font-family: Consolas, monospace;
+}
+.file-chip:hover { background: var(--hover); color: var(--text); }
+.file-chip.active { color: var(--text); border-color: var(--accent); }
+#libEditorWrap { flex: 1; display: flex; padding: 12px 18px; min-height: 0; }
+#libEditor {
+  flex: 1; background: var(--panel2); border: 1px solid var(--border); color: var(--text);
+  border-radius: 10px; padding: 12px 14px; resize: none; outline: none;
+  font-family: Consolas, "Microsoft YaHei", monospace; font-size: 13px; line-height: 1.6;
+}
+#libEditor:focus { border-color: var(--accent); }
+#libBar {
+  display: flex; align-items: center; justify-content: flex-end; gap: 12px;
+  padding: 0 18px 14px;
+}
+#libStatus { color: var(--muted); font-size: 12px; }

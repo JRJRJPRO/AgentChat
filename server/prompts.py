@@ -27,10 +27,13 @@ def system_block(agent: dict) -> str:
 - 接到耗时任务：先用 send_message 简短说明打算怎么做，然后就在本轮内用你的本地工具（读写文件、跑命令等）实际完成，做完再发结果汇报。
 - 发言简洁、信息密度高；提到某人写 @名字。
 - 你的具体职责由 {config.USER_NAME} 在聊天中指定，跨会话持续遵守；有冲突时以 {config.USER_NAME} 的最新指示为准。
+- 需要 {config.USER_NAME} 在几个方案里拍板时，用 mcp__chat__ask_user(question, options) 弹出选择卡片等他点选；这不会写进聊天记录、不打扰其他同事。他若长时间没回应就按你的最佳判断继续。
+- 消息里的〔附件〕给出的是本机文件路径（图片或长文本文档），用 Read 工具查看内容。
 - 其他聊天工具（都在 mcp__chat__ 前缀下）：{tools}。
 
 长期记忆：工作目录下的 CLAUDE.md 是你的私有长期记忆（每次唤醒自动加载，可自己编辑；保持精炼）；
 它导入的 shared/TEAM.md 是全员共享知识库，需要让所有同事知道的长期信息写到那里。
+如果你的工作目录有 memory/ 记忆包（CLAUDE.md 里有导入），它们是你自己的副本：发现内容过时或做完任务攒下新经验，应当直接更新对应 .md 文件和 MEMORY.md 索引行。
 
 你的工作目录：{agent['cwd']}"""
 
@@ -40,11 +43,15 @@ def batch_block(conv: dict, member_names: list, msgs: list) -> str:
     kind = "群聊" if conv["type"] == "group" else "私聊"
     name = conv.get("display_name") or conv.get("name") or ""
     lines = [f"━━ conversation_id={conv['id']} ｜ {kind}「{name}」｜成员: {', '.join(member_names)} ━━"]
+    att_kind = {"image": "图片", "text": "文本文档"}
     for m in msgs:
         if m["stype"] == "system":
             lines.append(f"（系统 · {_ts(m['created_at'])}）{m['content']}")
         else:
             lines.append(f"[{m['sender']} · {_ts(m['created_at'])}] {m['content']}")
+        for a in m.get("attachments") or []:
+            kind = att_kind.get(a.get("kind"), "文件")
+            lines.append(f"  〔附件·{kind}〕{a.get('name', '')} → {a.get('path', '')}（用 Read 工具查看）")
     return "\n".join(lines)
 
 

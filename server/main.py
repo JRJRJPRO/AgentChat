@@ -12,7 +12,7 @@ from fastapi import FastAPI, Body, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import config, db, prompts, skills, usage
+from . import auth, config, db, memories, prompts, skills, usage
 from .hub import Hub
 
 
@@ -73,8 +73,15 @@ def agent_view(a):
         "permission": a["permission"], "memo": a["memo"], "status": a["status"],
         "wake_count": a["wake_count"], "last_wake_at": a["last_wake_at"],
         "extra_dirs": a.get("extra_dirs") or "", "skills": [s for s in (a.get("skills") or "").split(",") if s],
+        "memories": [m for m in (a.get("memories") or "").split(",") if m],
         "ask_perm": bool(a.get("ask_perm")), "run": hub.run_state(a["id"]),
     }
+
+
+@app.get("/api/agents/{aid}/activity")
+async def api_agent_activity(aid: int):
+    """本轮唤醒的过程动态（思考/工具调用），刷新页面或中途打开会话时补拉用。"""
+    return {"run": hub.run_state(aid), "items": hub.activity.get(aid, [])}
 
 
 def err(msg, code=400):
@@ -92,8 +99,34 @@ async def api_state():
         "models": config.MODELS,
         "permissions": list(config.PERMISSION_PRESETS.keys()),
         "defaults": {"model": config.DEFAULT_MODEL, "permission": config.DEFAULT_PERMISSION,
-                     "chain_limit": config.DEFAULT_CHAIN_LIMIT},
+                     "chain_limit": config.DEFAULT_CHAIN_LIMIT,
+                     "paste_doc_threshold": config.PASTE_DOC_THRESHOLD},
+        "auth": hub.auth_needed,
     }
+
+
+# ---------------- Claude 登录（OAuth 过期修复） ----------------
+
+@app.get("/api/auth/status")
+async def api_auth_status():
+    return {"needed": hub.auth_needed, "credentials": auth.credentials_status()}
+
+
+@app.post("/api/auth/login")
+async def api_auth_login():
+    """开一个终端窗口跑 claude /login（自动跳浏览器完成 OAuth）。"""
+    try:
+        auth.launch_login(hub.claude)
+    except Exception as e:
+        err(f"打开登录窗口失败: {e}", 500)
+    return {"ok": True}
+
+
+@app.post("/api/auth/clear")
+async def api_auth_clear():
+    """用户确认已重新登录：解除封锁，积压消息立刻补送。"""
+    await hub.clear_auth()
+    return {"ok": True}
 
 
 # ---------------- agent 管理 ----------------
@@ -121,6 +154,9 @@ async def api_create_agent(payload: dict = Body(...)):
     if payload.get("skills"):
         applied = skills.sync_agent_skills(a, payload["skills"])
         db.update_agent(a["id"], skills=",".join(applied))
+    if payload.get("memories"):
+        applied = memories.sync_agent_memories(a, payload["memories"])
+        db.update_agent(a["id"], memories=",".join(applied))
     a = db.get_agent(a["id"])
     dm = db.ensure_dm(db.USER, ("agent", a["id"]))
     await ws_manager.broadcast({"t": "convs_changed"})
@@ -150,6 +186,9 @@ async def api_update_agent(aid: int, payload: dict = Body(...)):
     if "skills" in payload:
         applied = skills.sync_agent_skills(a, payload["skills"] or [])
         kw["skills"] = ",".join(applied)
+    if "memories" in payload:
+        applied = memories.sync_agent_memories(a, payload["memories"] or [])
+        kw["memories"] = ",".join(applied)
     db.update_agent(aid, **kw)
     await ws_manager.broadcast({"t": "convs_changed"})
     return {"agent": agent_view(db.get_agent(aid))}
@@ -191,12 +230,123 @@ async def api_skills():
     }
 
 
+@app.get("/api/memories")
+async def api_memories():
+    return {"library": memories.list_library(), "dir": config.MEMORIES_DIR}
+
+
+# ---------------- 资源库（记忆/技能的查看与网页编辑） ----------------
+
+def _lib_root(kind):
+    if kind == "memories":
+        return config.MEMORIES_DIR
+    if kind == "skills":
+        return config.SKILLS_DIR
+    err("kind 只能是 memories 或 skills")
+
+
+_ILLEGAL_CHARS = set('/:*?"<>|' + chr(92))
+
+
+def _lib_path(kind, pack, fname=None):
+    """校验并拼出库内路径；pack/文件名不允许包含路径分隔符等，防穿越。"""
+    root = _lib_root(kind)
+    for part in ([pack, fname] if fname else [pack]):
+        if not part or part in (".", "..") or any(c in _ILLEGAL_CHARS for c in part):
+            err("名字含非法字符")
+    p = os.path.abspath(os.path.join(root, pack, fname) if fname else os.path.join(root, pack))
+    if not p.startswith(os.path.abspath(root) + os.sep):
+        err("路径越界")
+    return p
+
+
+@app.get("/api/library")
+async def api_library():
+    mems = memories.list_library()
+    sks = skills.list_library()
+    for s in sks:
+        d = os.path.join(config.SKILLS_DIR, s["name"])
+        s["files"] = sorted(f for f in os.listdir(d) if os.path.isfile(os.path.join(d, f)))
+    agents = [a for a in db.list_agents() if a["status"] != "archived"]
+    for m in mems:
+        m["used_by"] = [a["name"] for a in agents if m["name"] in (a.get("memories") or "").split(",")]
+    for s in sks:
+        s["used_by"] = [a["name"] for a in agents if s["name"] in (a.get("skills") or "").split(",")]
+    return {"memories": mems, "skills": sks,
+            "memories_dir": config.MEMORIES_DIR, "skills_dir": config.SKILLS_DIR}
+
+
+@app.post("/api/library/read")
+async def api_library_read(payload: dict = Body(...)):
+    path = _lib_path(payload.get("kind"), payload.get("pack"), payload.get("file"))
+    if not os.path.isfile(path):
+        err("文件不存在", 404)
+    if os.path.getsize(path) > 512 * 1024:
+        err("文件太大，请用本地编辑器打开")
+    with open(path, encoding="utf-8", errors="replace") as f:
+        return {"content": f.read()}
+
+
+@app.post("/api/library/save")
+async def api_library_save(payload: dict = Body(...)):
+    path = _lib_path(payload.get("kind"), payload.get("pack"), payload.get("file"))
+    if not os.path.isfile(path):
+        err("文件不存在（新建请走新建文件入口）", 404)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(payload.get("content") or "")
+    return {"ok": True}
+
+
+_MEM_TEMPLATE = """一句话描述这个记忆包（本行会显示在勾选列表里）
+
+- [示例条目](example.md) — 把长内容拆成单独文件，这里放索引
+"""
+
+_SKILL_TEMPLATE = """---
+description: 一句话描述这个技能
+---
+
+在这里写技能内容。
+"""
+
+
+@app.post("/api/library/new_pack")
+async def api_library_new_pack(payload: dict = Body(...)):
+    kind = payload.get("kind")
+    path = _lib_path(kind, (payload.get("name") or "").strip())
+    if os.path.exists(path):
+        err("已存在同名包")
+    os.makedirs(path)
+    if kind == "memories":
+        with open(os.path.join(path, "MEMORY.md"), "w", encoding="utf-8") as f:
+            f.write(_MEM_TEMPLATE)
+    else:
+        with open(os.path.join(path, "SKILL.md"), "w", encoding="utf-8") as f:
+            f.write(_SKILL_TEMPLATE)
+    return {"ok": True}
+
+
+@app.post("/api/library/new_file")
+async def api_library_new_file(payload: dict = Body(...)):
+    name = (payload.get("name") or "").strip()
+    if not name.lower().endswith(".md"):
+        name += ".md"
+    path = _lib_path(payload.get("kind"), payload.get("pack"), name)
+    if not os.path.isdir(os.path.dirname(path)):
+        err("包不存在", 404)
+    if os.path.exists(path):
+        err("已存在同名文件")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("")
+    return {"ok": True, "file": name}
+
+
 @app.post("/api/open_folder")
 async def api_open_folder(payload: dict = Body(...)):
-    # 只允许打开这两个技能目录，别的路径不开（本地工具，防手滑）
+    # 只允许打开这几个资源目录，别的路径不开（本地工具，防手滑）
     path = payload.get("path") or ""
-    if path not in (config.SKILLS_DIR, config.GLOBAL_SKILLS_DIR):
-        err("只允许打开技能目录")
+    if path not in (config.SKILLS_DIR, config.GLOBAL_SKILLS_DIR, config.MEMORIES_DIR):
+        err("只允许打开技能/记忆目录")
     os.makedirs(path, exist_ok=True)
     os.startfile(path)
     return {"ok": True}
@@ -264,6 +414,56 @@ async def api_perm_answer(rid: int, payload: dict = Body(...)):
     return {"ok": True}
 
 
+# ---------------- agent 提问选择卡（ask_user） ----------------
+# agent 需要用户拍板时调 mcp__chat__ask_user(question, options)，
+# 在界面上弹选择卡片；用户点选项或手打回答，答案只回给发问的 agent 本人，
+# 不写进聊天记录——群聊里其他 agent 的上下文不受任何污染。
+
+_ask_reqs = {}
+_ask_seq = 0
+
+
+async def _handle_ask_user(agent, args):
+    import asyncio
+    global _ask_seq
+    question = (args.get("question") or "").strip()
+    if not question:
+        raise ToolError("question 不能为空")
+    options = [str(o).strip() for o in (args.get("options") or []) if str(o).strip()][:8]
+    if not options:
+        raise ToolError("至少给一个选项（用户也可以手打自定义回答）")
+    _ask_seq += 1
+    rid = _ask_seq
+    info = {"id": rid, "agent_id": agent["id"], "agent": agent["name"],
+            "question": question[:600], "options": options}
+    fut = asyncio.get_event_loop().create_future()
+    _ask_reqs[rid] = {"future": fut, "info": info}
+    await ws_manager.broadcast({"t": "ask", "req": info})
+    try:
+        answer = await asyncio.wait_for(fut, timeout=config.ASK_USER_TIMEOUT)
+    except asyncio.TimeoutError:
+        answer = None
+    finally:
+        _ask_reqs.pop(rid, None)
+        await ws_manager.broadcast({"t": "ask_done", "id": rid})
+    if answer is None:
+        return f"{config.USER_NAME} 暂时没有回答（可能不在电脑前）。按你的最佳判断继续，必要时在聊天里留言说明你选了什么、为什么。"
+    return f"{config.USER_NAME} 的回答：{answer}"
+
+
+@app.get("/api/asks")
+async def api_asks():
+    return {"pending": [r["info"] for r in _ask_reqs.values()]}
+
+
+@app.post("/api/asks/{rid}/answer")
+async def api_ask_answer(rid: int, payload: dict = Body(...)):
+    r = _ask_reqs.get(rid)
+    if r and not r["future"].done():
+        r["future"].set_result(str(payload.get("answer") or "").strip()[:2000] or None)
+    return {"ok": True}
+
+
 @app.post("/api/shutdown")
 async def api_shutdown():
     import asyncio
@@ -319,13 +519,67 @@ async def api_send(cid: int, payload: dict = Body(...)):
     if not db.is_member(cid, "user", 0):
         err("你不在这个会话里，先加入才能发言")
     text = (payload.get("text") or "").strip()
-    if not text:
+    atts = _clean_attachments(payload.get("attachments"))
+    if not text and not atts:
         err("消息不能为空")
-    msg = db.post_message(cid, "user", 0, text)
+    msg = db.post_message(cid, "user", 0, text, attachments=atts)
     await hub.chain_clear(cid)  # 用户发言会重置链长
     await ws_manager.broadcast({"t": "msg", "conv_id": cid, "message": msg})
     hub.poke()
     return {"message": msg}
+
+
+# ---------------- 聊天附件（拖拽图片 / 大段文本转临时文档） ----------------
+
+def _clean_attachments(raw):
+    """只收之前经 /upload 落盘、路径确实在 uploads 目录里的附件，防伪造路径。"""
+    out = []
+    root = os.path.abspath(config.UPLOADS_DIR) + os.sep
+    for a in (raw or [])[:9]:
+        if not isinstance(a, dict):
+            continue
+        p = os.path.abspath(a.get("path") or "")
+        if p.startswith(root) and os.path.isfile(p):
+            out.append({"kind": a.get("kind") or "file", "name": str(a.get("name") or "")[:120],
+                        "path": p, "url": str(a.get("url") or ""), "size": int(a.get("size") or 0)})
+    return out
+
+
+_IMG_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}
+
+
+@app.post("/api/convs/{cid}/upload")
+async def api_upload(cid: int, payload: dict = Body(...)):
+    """收一个附件：{name, data(base64)} 是二进制文件（拖拽/粘贴的图片等）；
+    {name?, text} 是大段文本，落成 .md"临时文档"。返回附件描述，随消息一起发送。"""
+    db.get_conv(cid) or err("会话不存在", 404)
+    if not db.is_member(cid, "user", 0):
+        err("你不在这个会话里")
+    name = re.sub(r'[\\/:*?"<>|\r\n]', "_", (payload.get("name") or "").strip()) or "附件"
+    if payload.get("text") is not None:
+        if not name.lower().endswith((".md", ".txt")):
+            name += ".md"
+        data = payload["text"].encode("utf-8")
+        kind = "text"
+    else:
+        import base64
+        try:
+            data = base64.b64decode(payload.get("data") or "", validate=True)
+        except Exception:
+            err("data 不是合法的 base64")
+        kind = "image" if os.path.splitext(name)[1].lower() in _IMG_EXTS else "file"
+    if not data:
+        err("附件是空的")
+    if len(data) > config.UPLOAD_MAX_BYTES:
+        err(f"附件太大（上限 {config.UPLOAD_MAX_BYTES // 1024 // 1024}MB）")
+    subdir = os.path.join(config.UPLOADS_DIR, f"conv{cid}")
+    os.makedirs(subdir, exist_ok=True)
+    fname = f"{int(time.time() * 1000)}_{name}"
+    fpath = os.path.join(subdir, fname)
+    with open(fpath, "wb") as f:
+        f.write(data)
+    return {"attachment": {"kind": kind, "name": name, "path": fpath,
+                           "url": f"/uploads/conv{cid}/{fname}", "size": len(data)}}
 
 
 @app.post("/api/convs/{cid}/read")
@@ -494,6 +748,9 @@ async def _tool_dispatch(agent, tool, args):
         await ws_manager.broadcast({"t": "msg", "conv_id": cid, "message": msg})
         return f"已退出会话 {cid}"
 
+    if tool == "ask_user":
+        return await _handle_ask_user(agent, args)
+
     if tool == "list_agents":
         out = []
         for a in db.list_agents():
@@ -559,4 +816,6 @@ async def ws_endpoint(ws: WebSocket):
 
 
 # 静态文件放最后挂载，让 /api /ws 优先匹配
+os.makedirs(config.UPLOADS_DIR, exist_ok=True)  # mount 时目录必须已存在（lifespan 还没跑）
+app.mount("/uploads", StaticFiles(directory=config.UPLOADS_DIR), name="uploads")
 app.mount("/", StaticFiles(directory=config.WEB_DIR, html=True), name="web")

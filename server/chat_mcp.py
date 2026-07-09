@@ -91,6 +91,19 @@ TOOLS = [
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
+        "name": "ask_user",
+        "description": "向老板弹出一个选择卡片（问题+若干选项按钮），阻塞等他点选后返回所选答案。适合需要他拍板才能继续的场合。不会写进聊天记录、不打扰其他人；他长时间不回应会返回超时提示，届时按你的最佳判断继续。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "question": {"type": "string", "description": "要问的问题，简洁一点"},
+                "options": {"type": "array", "items": {"type": "string"},
+                            "description": "供点选的选项（2-6 个为宜）；老板也可以不选而是手打自定义回答"},
+            },
+            "required": ["question", "options"],
+        },
+    },
+    {
         # 系统内部用：开了"越权询问"的 agent，CLI 遇到权限不足的操作时
         # 会自动调这个工具（--permission-prompt-tool），阻塞等用户点允许/拒绝。
         # agent 自己不要主动调它。
@@ -108,8 +121,8 @@ def call_hub(tool, args):
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    # ask_permission 要一直等到用户点按钮，其余工具 30 秒足够
-    timeout = 660 if tool == "ask_permission" else 30
+    # ask_permission / ask_user 要一直等到用户点按钮，其余工具 30 秒足够
+    timeout = 660 if tool in ("ask_permission", "ask_user") else 30
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         out = json.loads(resp.read().decode("utf-8"))
     if not out.get("ok"):

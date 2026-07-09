@@ -3,3 +3,4 @@ data/
 workspaces/
 __pycache__/
 *.pyc
+memories/

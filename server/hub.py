@@ -18,7 +18,7 @@ import sys
 import time
 import uuid
 
-from . import config, db, prompts
+from . import auth, config, db, memories, prompts
 
 
 class Hub:
@@ -31,6 +31,8 @@ class Hub:
         self.fails = {}          # agent_id -> 连续失败次数
         self.interrupted = set() # 被打断过、下次唤醒要带"被打断"标注的 agent
         self.chain_notified = set()  # 已经广播过"链长暂停"的会话，避免刷屏
+        self.activity = {}       # agent_id -> 本轮唤醒的过程动态 [{ts,k,...}]（只进内存和界面，不进聊天记录）
+        self.auth_needed = None  # 登录失效时 {"agent","detail","ts"}；置位期间暂停一切唤醒
         self.claude = shutil.which("claude")
         self.git_bash = self._find_git_bash()  # Windows 上 claude 需要 git-bash
 
@@ -87,6 +89,14 @@ class Hub:
             self.chain_notified.discard(cid)
             await self.broadcast({"t": "chain", "conv_id": cid, "paused": False})
 
+    async def clear_auth(self):
+        """用户在界面上点了"已登录，重试"：解除唤醒封锁并立刻补送积压消息。"""
+        if self.auth_needed:
+            self.auth_needed = None
+            await self.broadcast({"t": "auth", "needed": False})
+        self.fails.clear()
+        self.poke()
+
     # ---------- 主循环 ----------
 
     async def run(self):
@@ -98,6 +108,8 @@ class Hub:
             if self.event.is_set():
                 self.event.clear()
                 await asyncio.sleep(config.WAKE_DEBOUNCE)  # 攒一批
+            if self.auth_needed:
+                continue  # 登录失效期间不唤醒（消息留在队列里，重新登录后一次补送）
             for agent in db.list_agents():
                 aid = agent["id"]
                 if agent["status"] != "active" or aid in self.running:
@@ -156,7 +168,9 @@ class Hub:
         allowed = ",".join(config.ALLOWED_CHAT_TOOLS + preset["extra_allowed"])
 
         cmd = self._claude_cmd() + [
-            "-p", "--output-format", "json",  # json 里带每次唤醒的 token 用量
+            # stream-json：逐事件输出，边跑边把"在想什么/用了什么工具"推给界面；
+            # 最后一条 result 事件里带本次唤醒的 token 用量（-p 下 stream-json 必须配 --verbose）
+            "-p", "--verbose", "--output-format", "stream-json",
             "--model", config.MODEL_IDS.get(agent["model"], agent["model"]),
             "--permission-mode", preset["mode"],
             "--allowedTools", allowed,
@@ -172,7 +186,7 @@ class Hub:
         cmd += ["--session-id", agent["session_id"]] if first else ["--resume", agent["session_id"]]
 
         os.makedirs(agent["cwd"], exist_ok=True)
-        self._ensure_claude_md(agent)
+        memories.ensure_claude_md(agent)
         log_path = os.path.join(config.LOG_DIR, f"agent{aid}_{int(time.time())}.log")
         env = dict(os.environ)
         for k in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT"):
@@ -185,17 +199,41 @@ class Hub:
         await self.broadcast({"t": "agent", "id": aid, "run": "working"})
 
         started = time.time()
+        self.activity[aid] = []
+        result_evt = {}
         with open(log_path, "w", encoding="utf-8", errors="replace") as f:
             f.write(f"# cmd: {cmd}\n# ---- prompt ----\n{prompt}\n# ---- output ----\n")
             f.flush()
             proc = await asyncio.create_subprocess_exec(
                 *cmd, cwd=agent["cwd"], env=env,
-                stdin=asyncio.subprocess.PIPE, stdout=f, stderr=f,
+                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=f,
+                limit=32 * 1024 * 1024,  # 单条事件可能很大（整段回复一行 JSON），别撞 StreamReader 默认 64K 上限
             )
             self.running[aid]["proc"] = proc
             self.running[aid]["log"] = log_path
+
+            async def feed_stdin():
+                try:
+                    proc.stdin.write(prompt.encode("utf-8"))
+                    await proc.stdin.drain()
+                    proc.stdin.close()
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    pass  # 进程闪退时喂不进去，让读端收尾
+
+            async def pump_stdout():
+                while True:
+                    line = await proc.stdout.readline()
+                    if not line:
+                        break
+                    s = line.decode("utf-8", "replace")
+                    f.write(s)
+                    f.flush()
+                    await self._on_stream_line(aid, s, result_evt)
+                await proc.wait()
+
             try:
-                await asyncio.wait_for(proc.communicate(prompt.encode("utf-8")), timeout=config.WAKE_TIMEOUT)
+                await asyncio.wait_for(asyncio.gather(feed_stdin(), pump_stdout()),
+                                       timeout=config.WAKE_TIMEOUT)
                 rc = proc.returncode
             except asyncio.TimeoutError:
                 proc.kill()
@@ -204,11 +242,29 @@ class Hub:
                 f.write("\n# !! 超时被杀\n")
 
         db.record_wake(aid)
-        db.add_wake(aid, started, rc, self._parse_usage(log_path), log_path)
+        db.add_wake(aid, started, rc, self._usage_from(result_evt), log_path)
         stopped = self.running.get(aid, {}).get("stopped")
         interrupt = self.running.get(aid, {}).get("interrupt")
-        if rc == 0:
+
+        # 先判登录问题：claude -p 遇到 OAuth 过期只会报错退出，这不是 agent 的锅，
+        # 不该记失败/自动暂停，而是全局挂起并引导用户在界面里重新登录
+        auth_err = None
+        if not stopped and not interrupt and (rc != 0 or result_evt.get("is_error")):
+            tail = (str(result_evt.get("result") or "")) + "\n" + self._log_tail(log_path)
+            auth_err = auth.find_auth_error(tail)
+
+        if auth_err:
+            for cid, cur in prev.items():
+                db.set_delivered(("agent", aid), cid, cur)  # 消息回队，登录后重发
+            if first and rc != 0:
+                db.update_agent(aid, session_id=str(uuid.uuid4()))
+            self.auth_needed = {"agent": agent["name"], "detail": auth_err, "ts": time.time()}
+            await self.broadcast({"t": "auth", "needed": True, **self.auth_needed})
+        elif rc == 0:
             self.fails[aid] = 0
+            if self.auth_needed:  # 有唤醒成功了，说明登录已恢复
+                self.auth_needed = None
+                await self.broadcast({"t": "auth", "needed": False})
             if first:
                 db.update_agent(aid, bootstrapped=1)
         elif stopped:
@@ -244,45 +300,75 @@ class Hub:
             await self.broadcast({"t": "msg", "conv_id": dm["id"], "message": msg})
             await self.broadcast({"t": "agent", "id": aid, "run": "idle"})
 
+    # ---------- 过程动态（stream-json 事件 → 界面） ----------
+
+    # 工具输入里最能说明"在干什么"的字段，按优先级取第一个有值的
+    _DETAIL_KEYS = ("file_path", "path", "command", "pattern", "description",
+                    "question", "url", "query", "prompt", "skill", "text")
+
+    async def _on_stream_line(self, aid, line, result_evt):
+        """解析 claude 输出的一行 stream-json 事件。
+        assistant 事件里的 text（agent 的"自言自语"）和 tool_use（读文件/改文件/跑命令）
+        转成过程动态推给界面；这些只进内存，绝不进聊天记录，不污染任何人的上下文。"""
+        try:
+            evt = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            return
+        etype = evt.get("type")
+        if etype == "result":
+            result_evt.update(evt)
+            return
+        if etype != "assistant":
+            return
+        for blk in (evt.get("message") or {}).get("content") or []:
+            btype = blk.get("type")
+            if btype == "text" and (blk.get("text") or "").strip():
+                item = {"k": "note", "text": blk["text"].strip()[:240]}
+            elif btype == "tool_use":
+                item = {"k": "tool", "tool": blk.get("name") or "?",
+                        "detail": self._tool_detail(blk.get("input") or {})}
+            else:
+                continue
+            item["ts"] = time.time()
+            acts = self.activity.setdefault(aid, [])
+            acts.append(item)
+            del acts[:-80]  # 只留最近 80 条
+            await self.broadcast({"t": "act", "id": aid, "item": item})
+
+    @classmethod
+    def _tool_detail(cls, tool_input):
+        for k in cls._DETAIL_KEYS:
+            v = tool_input.get(k)
+            if isinstance(v, str) and v.strip():
+                return v.strip().replace("\n", " ")[:160]
+        return ""
+
     # ---------- 工具 ----------
 
     @staticmethod
-    def _ensure_claude_md(agent):
-        """agent 的两级长期记忆：工作目录 CLAUDE.md（私有）+ @导入 shared/TEAM.md（全员共享）。
-        CLAUDE.md 每次启动必定全文进上下文（无头模式也是），比 memory 目录可靠。
-        只在缺失时生成模板，已有的绝不覆盖。"""
-        path = os.path.join(agent["cwd"], "CLAUDE.md")
-        if os.path.exists(path):
-            return
-        team = config.SHARED_TEAM_FILE.replace("\\", "/")
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(
-                f"# 「{agent['name']}」的长期记忆\n\n"
-                f"@{team}\n\n"
-                "上面一行导入了团队共享知识库（全员共用；要改共享内容请编辑那个文件本身）。\n"
-                "从这里往下是只属于你的长期知识：职责总结、John 的相关偏好、踩坑经验。\n"
-                "本文件每次唤醒都自动进入你的上下文，你可以随时自己编辑更新——保持精炼。\n"
-            )
+    def _log_tail(log_path, nbytes=8000):
+        try:
+            with open(log_path, "rb") as f:
+                f.seek(0, 2)
+                f.seek(max(0, f.tell() - nbytes))
+                return f.read().decode("utf-8", "replace")
+        except OSError:
+            return ""
 
     @staticmethod
-    def _parse_usage(log_path):
-        """从 claude -p --output-format json 的输出里抠 token 用量。失败就算了，不影响主流程。"""
-        try:
-            with open(log_path, encoding="utf-8", errors="replace") as f:
-                text = f.read()
-            payload = text.split("# ---- output ----\n", 1)[1].strip()
-            data = json.loads(payload[payload.index("{"):])
-            u = data.get("usage") or {}
-            return {
-                "input_tokens": u.get("input_tokens", 0),
-                "output_tokens": u.get("output_tokens", 0),
-                "cache_read_input_tokens": u.get("cache_read_input_tokens", 0),
-                "cache_creation_input_tokens": u.get("cache_creation_input_tokens", 0),
-                "cost_usd": data.get("total_cost_usd", 0.0),
-                "num_turns": data.get("num_turns", 0),
-            }
-        except Exception:
+    def _usage_from(result_evt):
+        """从 stream-json 最后的 result 事件里抠 token 用量。缺了就算了，不影响主流程。"""
+        if not result_evt:
             return None
+        u = result_evt.get("usage") or {}
+        return {
+            "input_tokens": u.get("input_tokens", 0),
+            "output_tokens": u.get("output_tokens", 0),
+            "cache_read_input_tokens": u.get("cache_read_input_tokens", 0),
+            "cache_creation_input_tokens": u.get("cache_creation_input_tokens", 0),
+            "cost_usd": result_evt.get("total_cost_usd", 0.0),
+            "num_turns": result_evt.get("num_turns", 0),
+        }
 
     def _claude_cmd(self):
         p = self.claude

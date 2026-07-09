@@ -10,6 +10,11 @@ const S = {
   theme: localStorage.getItem("theme") || "dark",
   stats: null,
   skillsInfo: null,
+  memsInfo: null,
+  library: null,      // 资源库数据 {memories, skills}
+  lib: null,          // 当前打开的包 {kind, pack}
+  libFile: null,
+  libDirty: false,
   tab: "chats",
   agents: [],
   convs: [],          // 我的会话摘要
@@ -24,6 +29,9 @@ const S = {
   defaults: {},
   models: [],
   permissions: [],
+  acts: {},           // agent_id -> 本轮过程动态（思考/工具调用，只展示不进记录）
+  pendAtts: [],       // 待发送附件 [{kind,name,path,url,size}]
+  auth: null,         // 登录失效信息（null = 正常）
 };
 
 const $ = (id) => document.getElementById(id);
@@ -146,22 +154,25 @@ function renderConvList(root, convs, emptyKey, isDiscover) {
     const item = document.createElement("div");
     item.className = "conv-item" + (S.cur && S.cur.id === c.id ? " active" : "");
     const isDm = c.type === "dm";
-    let dot = "";
-    if (isDm && c.is_member) {
+    let dot = "", archived = false;
+    if (isDm) {
       const other = c.members.find((m) => m.mtype === "agent");
-      if (other) dot = agentDot(agentById(other.mid));
+      const ag = other ? agentById(other.mid) : null;
+      if (ag && ag.status === "archived") archived = true;
+      else if (ag && c.is_member) dot = agentDot(ag);
     }
     let prev = "";
     if (c.last_msg) {
       const who = c.last_msg.stype === "system" ? "" : (c.last_msg.sender ? c.last_msg.sender + ": " : "");
-      prev = who + c.last_msg.content.replace(/\s+/g, " ").slice(0, 60);
+      const body = c.last_msg.content || ((c.last_msg.attachments || []).length ? "📎 " + t("att_file") : "");
+      prev = who + body.replace(/\s+/g, " ").slice(0, 60);
     }
     const right = [];
     right.push(`<span class="conv-time">${fmtTime(c.last_ts)}</span>`);
     if (c.unread > 0) right.push(`<span class="badge">${c.unread > 99 ? "99+" : c.unread}</span>`);
     else if (isDiscover) right.push(`<span class="tag">${t(c.is_member ? "mine_tag" : "spectate_tag")}</span>`);
     item.innerHTML =
-      avatarHtml(c.display_name, false, "", dot) +
+      avatarHtml(c.display_name, false, (isDm ? "round" : "") + (archived ? " archived" : ""), dot) +
       `<div class="conv-mid"><div class="conv-name">${esc(c.display_name)}</div>` +
       `<div class="conv-prev">${esc(prev)}</div></div>` +
       `<div class="conv-right">${right.join("")}</div>`;
@@ -177,13 +188,18 @@ function renderAgentList() {
     root.innerHTML = `<div class="list-empty">${esc(t("empty_agents"))}</div>`;
     return;
   }
-  for (const a of S.agents) {
+  const ordered = [...S.agents].sort((x, y) =>
+    (x.status === "archived" ? 1 : 0) - (y.status === "archived" ? 1 : 0));
+  for (const a of ordered) {
     const card = document.createElement("div");
-    card.className = "agent-card";
+    card.className = "agent-card" + (a.status === "archived" ? " archived" : "");
     const running = S.working.has(a.id);
     const stText = running ? t("working") : t(a.status === "active" ? "online" : a.status);
+    const av = a.status === "archived"
+      ? avatarHtml(a.name, false, "round archived", "")
+      : avatarHtml(a.name, false, "round", agentDot(a));
     card.innerHTML =
-      `<div class="row1">${avatarHtml(a.name, false, "", agentDot(a))}` +
+      `<div class="row1">${av}` +
       `<div style="flex:1;min-width:0"><div class="a-name">${esc(a.name)}</div>` +
       `<div class="a-sub">${stText} · ${esc(a.model)} · ${a.wake_count}${t("wakes")}${a.memo ? " · " + esc(a.memo) : ""}</div></div></div>` +
       `<div class="a-btns"></div>`;
@@ -222,7 +238,17 @@ async function setAgentStatus(aid, status) {
 
 // ---------------- 会话打开与消息 ----------------
 
+function saveDraft(cid) {
+  const v = $("input").value;
+  if (v.trim()) localStorage.setItem("draft:" + cid, v);
+  else localStorage.removeItem("draft:" + cid);
+}
+
 async function openConv(cid) {
+  if (S.lib && !libConfirmDiscard()) return;
+  if (S.cur && S.cur.id !== cid) saveDraft(S.cur.id);
+  S.lib = null; S.libFile = null; S.libDirty = false;
+  $("lib").classList.add("hidden");
   const d = await api(`/api/convs/${cid}`);
   S.cur = d.conv;
   S.spectate = !d.conv.is_member;
@@ -239,10 +265,20 @@ async function openConv(cid) {
   markRead();
   renderLists();
   renderBanner();
+  S.pendAtts = [];
+  renderAttachBar();
   renderTyping();
+  // 有成员正在干活的话，补拉它本轮的过程动态（刷新页面/中途进来也能看到）
+  for (const m of d.conv.members) {
+    if (m.mtype === "agent" && S.working.has(m.mid)) fetchActs(m.mid);
+  }
   $("composer").classList.toggle("hidden", S.spectate);
   $("spectateBar").classList.toggle("hidden", !S.spectate);
-  if (!S.spectate) $("input").focus();
+  const input = $("input");
+  input.value = localStorage.getItem("draft:" + cid) || "";
+  input.style.height = "auto";
+  if (input.value) input.style.height = Math.min(input.scrollHeight, 160) + "px";
+  if (!S.spectate) input.focus();
 }
 
 function renderChatHead() {
@@ -259,6 +295,24 @@ function pushMsg(m, prepend) {
   return true;
 }
 
+function fmtSize(n) {
+  if (n >= 1048576) return (n / 1048576).toFixed(1) + "MB";
+  if (n >= 1024) return Math.round(n / 1024) + "KB";
+  return n + "B";
+}
+
+function attsHtml(atts) {
+  let out = "";
+  for (const a of atts || []) {
+    if (a.kind === "image") {
+      out += `<img class="msg-img" src="${esc(a.url)}" alt="${esc(a.name)}" onclick="window.open('${esc(a.url)}','_blank')">`;
+    } else {
+      out += `<a class="file-att" href="${esc(a.url)}" target="_blank">📄 ${esc(a.name)} · ${fmtSize(a.size || 0)}</a>`;
+    }
+  }
+  return out;
+}
+
 function msgHtml(m) {
   if (m.stype === "system") {
     return `<div class="sys-msg ${m.kind === "error" ? "error" : ""}">${esc(m.content)} · ${fmtTime(m.created_at)}</div>`;
@@ -268,10 +322,10 @@ function msgHtml(m) {
   const showName = !mine && S.cur.type === "group";
   return (
     `<div class="msg-row ${mine ? "mine" : ""}" data-mid="${m.id}">` +
-    avatarHtml(mine ? "" : m.sender, mine, "small", a ? "" : "") +
+    avatarHtml(mine ? "" : m.sender, mine, "small round", a ? "" : "") +
     `<div class="msg-body">` +
     (showName ? `<div class="msg-sender">${esc(m.sender)}</div>` : "") +
-    `<div class="bubble">${mdlite(m.content)}</div>` +
+    `<div class="bubble">${mdlite(m.content)}${attsHtml(m.attachments)}</div>` +
     `<div class="msg-time">${fmtTime(m.created_at)}</div>` +
     `</div></div>`
   );
@@ -331,17 +385,71 @@ function markRead() {
 async function sendMsg() {
   const input = $("input");
   const text = input.value.trim();
-  if (!text || !S.cur) return;
+  const atts = S.pendAtts.slice();
+  if ((!text && !atts.length) || !S.cur) return;
   input.value = "";
   input.style.height = "auto";
+  S.pendAtts = [];
+  renderAttachBar();
   try {
-    const r = await api(`/api/convs/${S.cur.id}/send`, { text });
+    const r = await api(`/api/convs/${S.cur.id}/send`, { text, attachments: atts });
+    localStorage.removeItem("draft:" + S.cur.id);
     appendMsg(r.message);
     markRead();
   } catch (e) {
     input.value = text;
+    S.pendAtts = atts;
+    renderAttachBar();
     toast(e.message, 1);
   }
+}
+
+// ---------------- 附件（拖拽图片 / 粘贴长文本自动转临时文档） ----------------
+
+function renderAttachBar() {
+  const bar = $("attachBar");
+  if (!S.pendAtts.length) { bar.classList.add("hidden"); bar.innerHTML = ""; return; }
+  bar.classList.remove("hidden");
+  bar.innerHTML = "";
+  S.pendAtts.forEach((a, i) => {
+    const chip = document.createElement("div");
+    chip.className = "att-chip";
+    const icon = a.kind === "image" ? `<img src="${esc(a.url)}" alt="">` : "📄";
+    chip.innerHTML = `${icon}<span class="att-name">${esc(a.name)}</span>` +
+      `<span class="att-sz">${fmtSize(a.size || 0)}</span><span class="att-x" title="移除">✕</span>`;
+    chip.querySelector(".att-x").onclick = () => { S.pendAtts.splice(i, 1); renderAttachBar(); };
+    bar.appendChild(chip);
+  });
+}
+
+async function uploadFile(file) {
+  if (!S.cur || S.spectate) return;
+  if (file.size > 30 * 1024 * 1024) { toast(t("upload_fail") + ": >30MB", 1); return; }
+  toast(t("uploading"));
+  try {
+    const b64 = await new Promise((res, rej) => {
+      const rd = new FileReader();
+      rd.onload = () => res(rd.result.split(",", 2)[1] || "");
+      rd.onerror = rej;
+      rd.readAsDataURL(file);
+    });
+    const name = file.name && file.name !== "image.png" ? file.name
+      : `${t("att_image")}_${new Date().toISOString().slice(0, 19).replace(/[:T-]/g, "")}.png`;
+    const r = await api(`/api/convs/${S.cur.id}/upload`, { name, data: b64 });
+    S.pendAtts.push(r.attachment);
+    renderAttachBar();
+  } catch (e) { toast(t("upload_fail") + ": " + e.message, 1); }
+}
+
+async function uploadPastedText(text) {
+  if (!S.cur || S.spectate) return;
+  try {
+    const name = `${t("att_doc_name")}_${new Date().toISOString().slice(5, 16).replace(/[:T]/g, "")}.md`;
+    const r = await api(`/api/convs/${S.cur.id}/upload`, { name, text });
+    S.pendAtts.push(r.attachment);
+    renderAttachBar();
+    toast(t("paste_as_doc"));
+  } catch (e) { toast(t("upload_fail") + ": " + e.message, 1); }
 }
 
 function renderBanner() {
@@ -380,6 +488,48 @@ function renderTyping() {
   } else {
     el.classList.add("hidden");
   }
+  renderActs();
+}
+
+// ---------------- 过程动态（正在思考/读写文件/跑命令，只展示不进聊天记录） ----------------
+
+function toolLabel(name) {
+  const short = name.startsWith("mcp__chat__") ? name.slice(11) : name;
+  const k = "tool_" + short;
+  return (I18N[S.lang] && I18N[S.lang][k]) || short;
+}
+
+function actLineHtml(it) {
+  if (it.k === "note") {
+    return `<div class="act-line"><span>💭</span><span class="a-note">${esc(it.text)}</span></div>`;
+  }
+  return `<div class="act-line"><span class="a-tool">▸ ${esc(toolLabel(it.tool))}</span>` +
+    `<span class="a-detail">${esc(it.detail || "")}</span></div>`;
+}
+
+function renderActs() {
+  const el = $("actFeed");
+  if (!S.cur) return el.classList.add("hidden");
+  const workers = S.cur.members.filter((m) => m.mtype === "agent" && S.working.has(m.mid));
+  let html = "";
+  for (const m of workers) {
+    const items = S.acts[m.mid] || [];
+    if (!items.length) continue;
+    html += `<div class="act-head">${esc(m.name)} · ${esc(t("act_title"))}</div>`;
+    html += items.slice(-30).map(actLineHtml).join("");
+  }
+  if (!html) return el.classList.add("hidden");
+  const stick = el.classList.contains("hidden") || el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+  el.innerHTML = html;
+  el.classList.remove("hidden");
+  if (stick) el.scrollTop = el.scrollHeight;
+}
+
+async function fetchActs(aid) {
+  try {
+    const r = await api(`/api/agents/${aid}/activity`);
+    if (r.items && r.items.length) { S.acts[aid] = r.items; renderActs(); }
+  } catch (e) { /* 静默 */ }
 }
 
 // ---------------- 数据刷新 ----------------
@@ -392,6 +542,8 @@ async function refreshLists() {
   S.models = st.models;
   S.permissions = st.permissions;
   S.defaults = st.defaults;
+  S.auth = st.auth || null;
+  renderAuthBar();
   if (S.tab === "discover") {
     const d = await api("/api/convs?scope=all");
     S.discover = d.convs;
@@ -420,12 +572,25 @@ function connectWS() {
     const d = JSON.parse(ev.data);
     if (d.t === "msg") onWsMsg(d);
     else if (d.t === "agent") {
-      if (d.run === "working") S.working.add(d.id);
+      if (d.run === "working") { S.working.add(d.id); S.acts[d.id] = []; }
       else S.working.delete(d.id);
       const a = agentById(d.id);
       if (a) a.run = d.run;
       renderLists();
       renderTyping();
+    } else if (d.t === "act") {
+      (S.acts[d.id] = S.acts[d.id] || []).push(d.item);
+      if (S.acts[d.id].length > 100) S.acts[d.id].splice(0, S.acts[d.id].length - 100);
+      renderActs();
+    } else if (d.t === "auth") {
+      S.auth = d.needed ? d : null;
+      renderAuthBar();
+      if (!d.needed) toast(t("auth_recovered"));
+    } else if (d.t === "ask") {
+      addAskCard(d.req);
+    } else if (d.t === "ask_done") {
+      const card = $("ask" + d.id);
+      if (card) card.remove();
     } else if (d.t === "chain") {
       const c = S.convs.find((x) => x.id === d.conv_id);
       if (c && c.chain) c.chain.paused = d.paused;
@@ -446,7 +611,7 @@ function connectWS() {
     }
   };
   ws.onclose = () => setTimeout(connectWS, 2000);
-  ws.onopen = () => { refreshLists(); loadPendingPerms(); };
+  ws.onopen = () => { refreshLists(); loadPendingPerms(); loadPendingAsks(); };
   setInterval(() => { if (ws.readyState === 1) ws.send("ping"); }, 30000);
 }
 
@@ -527,6 +692,31 @@ function checkedSkills(rootId) {
   return [...$(rootId).querySelectorAll("input:checked")].map((x) => x.value);
 }
 
+async function renderMemChecks(rootId, checkedNames) {
+  const root = $(rootId);
+  root.innerHTML = "";
+  while (root.nextElementSibling && root.nextElementSibling.classList.contains("skill-note")) {
+    root.nextElementSibling.remove();
+  }
+  try {
+    if (!S.memsInfo) S.memsInfo = await api("/api/memories");
+    const lib = S.memsInfo.library;
+    if (!lib.length) {
+      root.insertAdjacentHTML("afterend", `<div class="skill-note">${esc(t("memories_none"))}</div>`);
+      return;
+    }
+    for (const m of lib) {
+      const line = document.createElement("label");
+      line.className = "check-line";
+      const on = checkedNames.includes(m.name) ? "checked" : "";
+      line.innerHTML = `<input type="checkbox" value="${esc(m.name)}" ${on}>` +
+        `<span><b>${esc(m.name)}</b>${m.description ? " — " + esc(m.description.slice(0, 60)) : ""}</span>`;
+      root.appendChild(line);
+    }
+    root.insertAdjacentHTML("afterend", `<div class="skill-note">${esc(t("memories_hint"))}</div>`);
+  } catch (e) { root.innerHTML = ""; }
+}
+
 function openNewAgent() {
   fillSelect($("agModel"), S.models, S.defaults.model);
   fillSelect($("agPerm"), S.permissions, S.defaults.permission);
@@ -534,6 +724,7 @@ function openNewAgent() {
   $("agAsk").checked = false;
   updatePermHint();
   renderSkillChecks("agSkills", []);
+  renderMemChecks("agMems", []);
   openModal("modalAgent");
   $("agName").focus();
 }
@@ -553,6 +744,7 @@ async function createAgent() {
       extra_dirs: $("agDirs").value,
       ask_perm: $("agAsk").checked,
       skills: checkedSkills("agSkills"),
+      memories: checkedSkills("agMems"),
     });
     closeModal();
     toast(t("agent_created"));
@@ -575,6 +767,7 @@ function openAgentEdit(a) {
   $("aeInfo").textContent = `${t("f_cwd")}: ${a.cwd}`;
   $("aeInfo").className = "info-line";
   renderSkillChecks("aeSkills", a.skills || []);
+  renderMemChecks("aeMems", a.memories || []);
   openModal("modalAgentEdit");
 }
 
@@ -587,6 +780,7 @@ async function saveAgentEdit() {
       extra_dirs: $("aeDirs").value,
       ask_perm: $("aeAsk").checked,
       skills: checkedSkills("aeSkills"),
+      memories: checkedSkills("aeMems"),
     });
     closeModal();
     refreshLists();
@@ -636,7 +830,7 @@ function openConvInfo() {
     const isUser = m.mtype === "user";
     const a = isUser ? null : agentById(m.mid);
     line.innerHTML =
-      avatarHtml(isUser ? "" : m.name, isUser, "small", a ? agentDot(a) : "") +
+      avatarHtml(isUser ? "" : m.name, isUser, "small round", a ? agentDot(a) : "") +
       `<span class="m-name">${esc(isUser ? t("me") : m.name)}</span>`;
     if (!isUser && c.type === "group") {
       const rm = document.createElement("button");
@@ -673,9 +867,151 @@ function setTab(tab) {
   $("listChats").classList.toggle("hidden", tab !== "chats");
   $("listAgents").classList.toggle("hidden", tab !== "agents");
   $("listDiscover").classList.toggle("hidden", tab !== "discover");
+  $("listLibrary").classList.toggle("hidden", tab !== "library");
   if (tab === "discover") {
     api("/api/convs?scope=all").then((d) => { S.discover = d.convs; renderLists(); });
   }
+  if (tab === "library") loadLibrary();
+}
+
+// ---------------- 资源库（记忆/技能的查看与编辑） ----------------
+
+async function loadLibrary() {
+  try {
+    S.library = await api("/api/library");
+    renderLibraryList();
+  } catch (e) { toast(e.message, 1); }
+}
+
+function libPackInfo() {
+  if (!S.lib || !S.library) return null;
+  return (S.library[S.lib.kind] || []).find((p) => p.name === S.lib.pack) || null;
+}
+
+function libConfirmDiscard() {
+  return !S.libDirty || confirm(t("discard_confirm"));
+}
+
+function renderLibraryList() {
+  const root = $("listLibrary");
+  root.innerHTML = "";
+  if (!S.library) return;
+  root.insertAdjacentHTML("beforeend", `<div class="lib-note">${esc(t("lib_copy_note"))}</div>`);
+  for (const kind of ["memories", "skills"]) {
+    const sect = document.createElement("div");
+    sect.className = "lib-sect";
+    sect.innerHTML = `<span>${esc(t(kind === "memories" ? "lib_memories" : "lib_skills"))}</span>` +
+      `<button class="mini-btn">${esc(t("new_pack"))}</button>`;
+    sect.querySelector("button").onclick = () => newLibPack(kind);
+    root.appendChild(sect);
+    const packs = S.library[kind] || [];
+    if (!packs.length) {
+      root.insertAdjacentHTML("beforeend", `<div class="lib-note">${esc(t("empty_library"))}</div>`);
+      continue;
+    }
+    for (const p of packs) {
+      const item = document.createElement("div");
+      item.className = "lib-item" + (S.lib && S.lib.kind === kind && S.lib.pack === p.name ? " active" : "");
+      const used = p.used_by && p.used_by.length
+        ? `<span class="in-use">${esc(t("used_by") + p.used_by.join("、"))}</span>`
+        : esc(t("unused"));
+      item.innerHTML = `<div class="lib-name">${esc(p.name)}</div>` +
+        (p.description ? `<div class="lib-desc">${esc(p.description)}</div>` : "") +
+        `<div class="lib-used">${used} · ${p.files.length}${esc(t("files_n"))}</div>`;
+      item.onclick = () => openLibPack(kind, p.name);
+      root.appendChild(item);
+    }
+  }
+}
+
+async function openLibPack(kind, pack) {
+  if (!libConfirmDiscard()) return;
+  S.lib = { kind, pack };
+  S.libFile = null;
+  S.libDirty = false;
+  S.cur = null;
+  $("empty").classList.add("hidden");
+  $("chat").classList.add("hidden");
+  $("lib").classList.remove("hidden");
+  renderLibraryList();
+  renderLibView();
+  const info = libPackInfo();
+  const def = kind === "memories" ? "MEMORY.md" : "SKILL.md";
+  const file = info && info.files.length ? (info.files.includes(def) ? def : info.files[0]) : null;
+  if (file) openLibFile(file, true);
+}
+
+function renderLibView() {
+  const info = libPackInfo();
+  $("libTitle").textContent = S.lib ? S.lib.pack : "";
+  $("libSub").textContent = !info ? "" :
+    t(S.lib.kind === "memories" ? "lib_memories" : "lib_skills") + " · " +
+    (info.used_by && info.used_by.length ? t("used_by") + info.used_by.join("、") : t("unused"));
+  const box = $("libFiles");
+  box.innerHTML = "";
+  for (const f of (info ? info.files : [])) {
+    const chip = document.createElement("button");
+    chip.className = "file-chip" + (f === S.libFile ? " active" : "");
+    chip.textContent = f;
+    chip.onclick = () => openLibFile(f);
+    box.appendChild(chip);
+  }
+  if (!S.libFile) {
+    $("libEditor").value = "";
+    $("libStatus").textContent = t("select_file");
+  }
+}
+
+async function openLibFile(f, force) {
+  if (!force && !libConfirmDiscard()) return;
+  try {
+    const r = await api("/api/library/read", { kind: S.lib.kind, pack: S.lib.pack, file: f });
+    S.libFile = f;
+    S.libDirty = false;
+    renderLibView();
+    $("libEditor").value = r.content;
+    $("libStatus").textContent = "";
+  } catch (e) { toast(e.message, 1); }
+}
+
+async function saveLibFile() {
+  if (!S.lib || !S.libFile) return;
+  try {
+    await api("/api/library/save", {
+      kind: S.lib.kind, pack: S.lib.pack, file: S.libFile,
+      content: $("libEditor").value,
+    });
+    S.libDirty = false;
+    $("libStatus").textContent = t("saved");
+    S.memsInfo = S.skillsInfo = null; // 描述可能变了，下次弹窗重新拉
+    const keep = S.libFile;
+    await loadLibrary();
+    S.libFile = keep;
+    renderLibView();
+  } catch (e) { toast(e.message, 1); }
+}
+
+async function newLibPack(kind) {
+  const name = (prompt(t("pack_name_prompt")) || "").trim();
+  if (!name) return;
+  try {
+    await api("/api/library/new_pack", { kind, name });
+    S.memsInfo = S.skillsInfo = null;
+    await loadLibrary();
+    openLibPack(kind, name);
+  } catch (e) { toast(e.message, 1); }
+}
+
+async function newLibFile() {
+  if (!S.lib || !libConfirmDiscard()) return;
+  const name = (prompt(t("file_name_prompt")) || "").trim();
+  if (!name) return;
+  try {
+    const r = await api("/api/library/new_file", { kind: S.lib.kind, pack: S.lib.pack, name });
+    await loadLibrary();
+    renderLibView();
+    openLibFile(r.file, true);
+  } catch (e) { toast(e.message, 1); }
 }
 
 // ---------------- 设置弹窗 ----------------
@@ -772,6 +1108,54 @@ async function loadPendingPerms() {
   } catch (e) { /* 静默 */ }
 }
 
+// ---------------- agent 提问选择卡（ask_user） ----------------
+
+function addAskCard(r) {
+  if ($("ask" + r.id)) return;
+  const card = document.createElement("div");
+  card.className = "ask-card";
+  card.id = "ask" + r.id;
+  card.innerHTML =
+    `<div class="p-title">💬 ${esc(r.agent)} · ${esc(t("ask_title"))}</div>` +
+    `<div class="ask-q">${esc(r.question)}</div>` +
+    `<div class="ask-opts">` +
+    r.options.map((o, i) => `<button class="ask-opt" data-i="${i}">${esc(o)}</button>`).join("") +
+    `</div>` +
+    `<div class="ask-custom"><input placeholder="${esc(t("ask_custom_ph"))}">` +
+    `<button>${esc(t("ask_send"))}</button></div>`;
+  card.querySelectorAll(".ask-opt").forEach((b) =>
+    (b.onclick = () => answerAsk(r.id, r.options[+b.dataset.i])));
+  const inp = card.querySelector(".ask-custom input");
+  const send = () => { if (inp.value.trim()) answerAsk(r.id, inp.value.trim()); };
+  card.querySelector(".ask-custom button").onclick = send;
+  inp.addEventListener("keydown", (e) => { if (e.key === "Enter") send(); });
+  $("permPanel").appendChild(card);
+  notify(0, `${r.agent} ${t("ask_title")}`, r.question);
+}
+
+async function answerAsk(rid, answer) {
+  try { await api(`/api/asks/${rid}/answer`, { answer }); } catch (e) { toast(e.message, 1); }
+  const card = $("ask" + rid);
+  if (card) card.remove();
+}
+
+async function loadPendingAsks() {
+  try {
+    const d = await api("/api/asks");
+    for (const r of d.pending) addAskCard(r);
+  } catch (e) { /* 静默 */ }
+}
+
+// ---------------- Claude 登录失效提示条 ----------------
+
+function renderAuthBar() {
+  const bar = $("authBar");
+  if (!S.auth) return bar.classList.add("hidden");
+  $("authText").textContent = `⚠ ${t("auth_needed")}` +
+    (S.auth.agent ? `（${S.auth.agent}: ${S.auth.detail || ""}）` : "");
+  bar.classList.remove("hidden");
+}
+
 // ---------------- 桌面通知（窗口不在前台时弹） ----------------
 
 function notify(convId, title, body) {
@@ -816,16 +1200,89 @@ function bind() {
   $("stShutdown").onclick = async () => {
     if (!confirm(t("shutdown_confirm"))) return;
     try { await api("/api/shutdown", {}); } catch (e) { /* 连接断开是预期的 */ }
-    toast(t("server_down"));
+    // 尝试关掉本标签页（只影响当前页，不动浏览器其他标签）；
+    // 启动器开的新标签可直接关，关不掉时退化成一个提示页
+    setTimeout(() => {
+      window.open("", "_self");
+      window.close();
+      setTimeout(() => {
+        document.body.innerHTML =
+          `<div style="height:100vh;display:flex;align-items:center;justify-content:center;` +
+          `font-size:15px;color:var(--muted)">${esc(t("server_down"))}</div>`;
+      }, 200);
+    }, 350);
   };
 
   $("aePerm").onchange = () => { $("aePermHint").textContent = t("perm_" + $("aePerm").value); };
+
+  $("libSave").onclick = saveLibFile;
+  $("libNewFile").onclick = newLibFile;
+  $("libEditor").addEventListener("input", () => {
+    S.libDirty = true;
+    $("libStatus").textContent = t("unsaved");
+  });
+  $("libEditor").addEventListener("keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") { e.preventDefault(); saveLibFile(); }
+  });
 
   if ("Notification" in window && Notification.permission === "default") {
     document.addEventListener("click", () => Notification.requestPermission(), { once: true });
   }
 
+  // 登录失效提示条
+  $("btnAuthLogin").onclick = async () => {
+    try { await api("/api/auth/login", {}); toast(t("auth_opened")); }
+    catch (e) { toast(e.message, 1); }
+  };
+  $("btnAuthRetry").onclick = async () => {
+    try { await api("/api/auth/clear", {}); } catch (e) { toast(e.message, 1); }
+  };
+
+  // 附件：📎按钮 / 拖拽 / 粘贴
+  $("btnAttach").onclick = () => $("fileInput").click();
+  $("fileInput").onchange = async () => {
+    for (const f of $("fileInput").files) await uploadFile(f);
+    $("fileInput").value = "";
+  };
+  const chat = $("chat");
+  let dragDepth = 0;
+  chat.addEventListener("dragenter", (e) => {
+    if (S.spectate || !e.dataTransfer.types.includes("Files")) return;
+    e.preventDefault();
+    dragDepth++;
+    $("dropHint").classList.remove("hidden");
+  });
+  chat.addEventListener("dragover", (e) => {
+    if (e.dataTransfer.types.includes("Files")) e.preventDefault();
+  });
+  chat.addEventListener("dragleave", () => {
+    if (--dragDepth <= 0) { dragDepth = 0; $("dropHint").classList.add("hidden"); }
+  });
+  chat.addEventListener("drop", async (e) => {
+    e.preventDefault();
+    dragDepth = 0;
+    $("dropHint").classList.add("hidden");
+    if (S.spectate) return;
+    for (const f of e.dataTransfer.files) await uploadFile(f);
+  });
+
   const input = $("input");
+  input.addEventListener("paste", (e) => {
+    const cd = e.clipboardData;
+    if (!cd) return;
+    const files = [...cd.files];
+    if (files.length) {
+      e.preventDefault();
+      files.forEach(uploadFile);
+      return;
+    }
+    const text = cd.getData("text");
+    const limit = (S.defaults && S.defaults.paste_doc_threshold) || 1500;
+    if (text && text.length > limit) {
+      e.preventDefault();
+      uploadPastedText(text);
+    }
+  });
   input.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
       e.preventDefault();
@@ -835,6 +1292,7 @@ function bind() {
   input.addEventListener("input", () => {
     input.style.height = "auto";
     input.style.height = Math.min(input.scrollHeight, 160) + "px";
+    if (S.cur) saveDraft(S.cur.id);
   });
   $("btnSend").onclick = sendMsg;
 

@@ -98,6 +98,7 @@ def init():
         _con.execute("INSERT OR IGNORE INTO meta VALUES('schema_version','1')")
         _con.commit()
     _migrate()
+    _sweep_orphans()
 
 
 def _migrate():
@@ -109,6 +110,34 @@ def _migrate():
         _exec("ALTER TABLE agents ADD COLUMN skills TEXT NOT NULL DEFAULT ''")
     if "ask_perm" not in cols:
         _exec("ALTER TABLE agents ADD COLUMN ask_perm INTEGER NOT NULL DEFAULT 0")
+    if "memories" not in cols:
+        _exec("ALTER TABLE agents ADD COLUMN memories TEXT NOT NULL DEFAULT ''")
+    mcols = {r["name"] for r in _rows("PRAGMA table_info(messages)")}
+    if "attachments" not in mcols:
+        # 附件（图片/临时文档）存 JSON 数组：[{kind,name,path,url,size}, ...]
+        _exec("ALTER TABLE messages ADD COLUMN attachments TEXT NOT NULL DEFAULT ''")
+
+
+def _sweep_orphans():
+    """启动时完整性清扫（幂等）：
+    1. members/cursors 里指向已不存在 agent 的行 -> 删（界面不再显示 agent#N）
+    2. 无消息且成员已失效的会话（零成员，或 dm 只剩一方）-> 连带删除
+       注意：有消息的会话一律保留（群聊只删无效成员行，群本身不动）。"""
+    _exec("DELETE FROM members WHERE mtype='agent' AND mid NOT IN (SELECT id FROM agents)")
+    _exec("DELETE FROM cursors WHERE mtype='agent' AND mid NOT IN (SELECT id FROM agents)")
+    for c in _rows("SELECT * FROM conversations"):
+        mems = _rows("SELECT * FROM members WHERE conv_id=?", (c["id"],))
+        broken = (not mems) or (c["type"] == "dm" and len(mems) < 2)
+        if not broken:
+            continue
+        has_msg = _row("SELECT 1 x FROM messages WHERE conv_id=? LIMIT 1", (c["id"],))
+        if has_msg:
+            continue
+        _exec("DELETE FROM cursors WHERE conv_id=?", (c["id"],))
+        _exec("DELETE FROM members WHERE conv_id=?", (c["id"],))
+        _exec("DELETE FROM conversations WHERE id=?", (c["id"],))
+    # 孤儿游标：会话已不存在的 cursor 行
+    _exec("DELETE FROM cursors WHERE conv_id NOT IN (SELECT id FROM conversations)")
 
 
 def _rows(sql, args=()):
@@ -283,20 +312,32 @@ def ensure_dm(a, b):
 
 # ---------------- messages ----------------
 
-def post_message(cid, stype, sid, content, kind="text"):
+def post_message(cid, stype, sid, content, kind="text", attachments=None):
+    import json as _json
     mid = _exec(
-        "INSERT INTO messages(conv_id,stype,sid,kind,content,created_at) VALUES(?,?,?,?,?,?)",
-        (cid, stype, sid, kind, content, time.time()),
+        "INSERT INTO messages(conv_id,stype,sid,kind,content,attachments,created_at) VALUES(?,?,?,?,?,?,?)",
+        (cid, stype, sid, kind, content,
+         _json.dumps(attachments, ensure_ascii=False) if attachments else "", time.time()),
     )
     if stype in ("user", "agent"):  # 自己发的自己视为已读、已送达
         bump_cursor(stype, sid, cid, mid)
     return get_message(mid)
 
 
+def _parse_atts(m):
+    import json as _json
+    try:
+        m["attachments"] = _json.loads(m["attachments"]) if m.get("attachments") else []
+    except Exception:
+        m["attachments"] = []
+    return m
+
+
 def get_message(mid):
     m = _row("SELECT * FROM messages WHERE id=?", (mid,))
     if m:
         m["sender"] = sender_name(m["stype"], m["sid"])
+        _parse_atts(m)
     return m
 
 
@@ -311,6 +352,7 @@ def list_messages(cid, before_id=None, limit=50):
     names = agent_names()
     for m in rs:
         m["sender"] = config.USER_NAME if m["stype"] == "user" else ("" if m["stype"] == "system" else names.get(m["sid"], f"agent#{m['sid']}"))
+        _parse_atts(m)
     return list(reversed(rs)), has_more
 
 
@@ -451,6 +493,7 @@ def agent_pending(agent):
         names = agent_names()
         for m in msgs:
             m["sender"] = config.USER_NAME if m["stype"] == "user" else ("" if m["stype"] == "system" else names.get(m["sid"], f"agent#{m['sid']}"))
+            _parse_atts(m)
         c["display_name"] = conv_summary(c, viewer=("agent", aid))["display_name"]
         res["batches"].append({"conv": c, "msgs": msgs, "member_names": member_names(c["id"])})
         res["wake"] = True

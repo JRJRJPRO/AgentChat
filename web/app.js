@@ -591,6 +591,14 @@ function connectWS() {
     } else if (d.t === "ask_done") {
       removeAskCard(d.id);
       if (d.reason === "timeout") toast(`${d.agent || ""}: ${t("ask_timeout")}`, 1);
+    } else if (d.t === "ask_hold") {
+      const card = $("ask" + d.id);
+      if (card) {
+        card.dataset.exp = d.expires_at;
+        card.dataset.held = "1";
+        card.querySelector(".ask-hold").classList.add("hidden");
+        updateAskTimers();
+      }
     } else if (d.t === "chain") {
       const c = S.convs.find((x) => x.id === d.conv_id);
       if (c && c.chain) c.chain.paused = d.paused;
@@ -1116,8 +1124,11 @@ function addAskCard(r) {
   card.className = "ask-card";
   card.id = "ask" + r.id;
   card.dataset.exp = r.expires_at || Date.now() / 1000 + 600;  // 兜底：老服务器没给截止时刻
+  if (r.held) card.dataset.held = "1";
   card.innerHTML =
-    `<div class="p-title"><span class="ask-timer"></span>💬 ${esc(r.agent)} · ${esc(t("ask_title"))}</div>` +
+    `<div class="p-title"><span class="ask-timer"></span>` +
+    `<button class="ask-hold${r.held ? " hidden" : ""}">⏸ ${esc(t("ask_hold"))}</button>` +
+    `💬 ${esc(r.agent)} · ${esc(t("ask_title"))}</div>` +
     `<div class="ask-q">${esc(r.question)}</div>` +
     `<div class="ask-opts">` +
     r.options.map((o, i) => `<button class="ask-opt" data-i="${i}">${esc(o)}</button>`).join("") +
@@ -1126,6 +1137,9 @@ function addAskCard(r) {
     `<button>${esc(t("ask_send"))}</button></div>`;
   card.querySelectorAll(".ask-opt").forEach((b) =>
     (b.onclick = () => answerAsk(r.id, r.options[+b.dataset.i])));
+  card.querySelector(".ask-hold").onclick = async () => {
+    try { await api(`/api/asks/${r.id}/hold`, {}); } catch (e) { toast(e.message, 1); }
+  };
   const inp = card.querySelector(".ask-custom input");
   const send = () => { if (inp.value.trim()) answerAsk(r.id, inp.value.trim()); };
   card.querySelector(".ask-custom button").onclick = send;
@@ -1169,8 +1183,13 @@ function renderAskOverlay() {
 
 function updateAskTimers() {
   document.querySelectorAll("#askList .ask-card").forEach((c) => {
-    const left = Math.max(0, Math.round(+c.dataset.exp - Date.now() / 1000));
     const el = c.querySelector(".ask-timer");
+    if (c.dataset.held) {  // 已取消倒计时：不再逼人
+      el.textContent = `∞ ${t("ask_held")}`;
+      el.classList.remove("urgent");
+      return;
+    }
+    const left = Math.max(0, Math.round(+c.dataset.exp - Date.now() / 1000));
     el.textContent = `⏳ ${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}`;
     el.classList.toggle("urgent", left < 60);
   });

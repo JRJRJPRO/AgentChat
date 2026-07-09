@@ -442,9 +442,18 @@ async def _handle_ask_user(agent, args):
     _ask_reqs[rid] = {"future": fut, "info": info}
     await ws_manager.broadcast({"t": "ask", "req": info})
     try:
-        answer = await asyncio.wait_for(fut, timeout=config.ASK_USER_TIMEOUT)
-    except asyncio.TimeoutError:
-        answer = None
+        # 分段等并每轮重查截止时刻：用户点「取消倒计时」会把 expires_at 推后
+        while True:
+            remain = info["expires_at"] - time.time()
+            if remain <= 0:
+                answer = None
+                break
+            try:
+                # shield：分段超时不能把真正的回答 future 一起取消掉
+                answer = await asyncio.wait_for(asyncio.shield(fut), timeout=min(remain, 5))
+                break
+            except asyncio.TimeoutError:
+                continue
     finally:
         _ask_reqs.pop(rid, None)
         await ws_manager.broadcast({"t": "ask_done", "id": rid, "agent": agent["name"],
@@ -464,6 +473,16 @@ async def api_ask_answer(rid: int, payload: dict = Body(...)):
     r = _ask_reqs.get(rid)
     if r and not r["future"].done():
         r["future"].set_result(str(payload.get("answer") or "").strip()[:2000] or None)
+    return {"ok": True}
+
+
+@app.post("/api/asks/{rid}/hold")
+async def api_ask_hold(rid: int):
+    """用户点「取消倒计时」：截止时刻推后（够慢慢打字），上限受 MCP HTTP 超时约束。"""
+    r = _ask_reqs.get(rid) or err("提问已结束", 404)
+    r["info"]["expires_at"] = time.time() + config.ASK_USER_HOLD_SECONDS
+    r["info"]["held"] = True
+    await ws_manager.broadcast({"t": "ask_hold", "id": rid, "expires_at": r["info"]["expires_at"]})
     return {"ok": True}
 
 

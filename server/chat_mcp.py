@@ -121,8 +121,9 @@ def call_hub(tool, args):
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    # ask_permission / ask_user 要一直等到用户点按钮，其余工具 30 秒足够
-    timeout = 660 if tool in ("ask_permission", "ask_user") else 30
+    # ask_permission / ask_user 要一直等到用户点按钮，其余工具 30 秒足够；
+    # ask_user 支持「取消倒计时」（服务器端最多再等 1 小时），HTTP 超时要盖过它
+    timeout = {"ask_permission": 660, "ask_user": 3700}.get(tool, 30)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         out = json.loads(resp.read().decode("utf-8"))
     if not out.get("ok"):

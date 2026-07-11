@@ -48,8 +48,10 @@ async def lifespan(app):
     db.init()
     import asyncio
     task = asyncio.create_task(hub.run())
+    mon = asyncio.create_task(hub.usage_monitor())
     yield
     task.cancel()
+    mon.cancel()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -102,7 +104,19 @@ async def api_state():
                      "chain_limit": config.DEFAULT_CHAIN_LIMIT,
                      "paste_doc_threshold": config.PASTE_DOC_THRESHOLD},
         "auth": hub.auth_needed,
+        "usage_monitor": {"warn_pct": hub.usage_warn_pct(), "poll_secs": hub.usage_poll_secs(),
+                          "alert": hub.usage_alert, "failing": hub.usage_failing},
     }
+
+
+@app.post("/api/usage_settings")
+async def api_usage_settings(payload: dict = Body(...)):
+    """设置里的两个滑杆：预警阈值 / 轮询间隔。存 db.meta，监控循环每轮现读、立即生效。"""
+    if "warn_pct" in payload:
+        db.set_meta("usage_warn_pct", max(30, min(95, int(payload["warn_pct"]))))
+    if "poll_secs" in payload:
+        db.set_meta("usage_poll_secs", max(60, min(900, int(payload["poll_secs"]))))
+    return {"warn_pct": hub.usage_warn_pct(), "poll_secs": hub.usage_poll_secs()}
 
 
 # ---------------- Claude 登录（OAuth 过期修复） ----------------
@@ -828,7 +842,7 @@ async def internal_tool(payload: dict = Body(...)):
         return JSONResponse({"ok": True, "result": result})
     try:
         result = await _tool_dispatch(agent, tool, payload.get("args") or {})
-        extra = _piggyback(agent)
+        extra = _piggyback(agent) + hub.usage_note(agent["id"])
         if extra:
             if not isinstance(result, str):
                 result = json.dumps(result, ensure_ascii=False, indent=1)

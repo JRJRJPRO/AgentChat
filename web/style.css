@@ -487,6 +487,13 @@ body.light .file-att { background: rgba(20,30,50,.05); }
 .file-chip.active { color: var(--text); border-color: var(--accent); }
 .file-chip.selected { color: var(--text); border-color: var(--accent); background: rgba(79,156,249,.15); }
 .file-chip.dim { opacity: .4; cursor: default; }
+
+/* 用量预警滑杆（设置弹窗） */
+.slider-row { display: flex; align-items: center; gap: 10px; margin: 6px 0; font-size: 13px; }
+.slider-row span { min-width: 72px; color: var(--muted); }
+.slider-row input[type="range"] { flex: 1; accent-color: var(--accent); }
+.slider-row b { min-width: 56px; text-align: right; font-variant-numeric: tabular-nums; }
+.usage-fail { color: var(--danger, #e5534b); font-size: 12px; margin-top: 6px; }
 #libEditorWrap { flex: 1; display: flex; padding: 12px 18px; min-height: 0; }
 #libEditor {
   flex: 1; background: var(--panel2); border: 1px solid var(--border); color: var(--text);

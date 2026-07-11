@@ -39,6 +39,8 @@ MAX_CONSEC_FAILURES = 2     # 连续唤醒失败这么多次就自动暂停该 a
 PERMISSION_ASK_TIMEOUT = 600  # "越权询问"等用户点允许/拒绝的最长秒数，超时按拒绝处理
 ASK_USER_TIMEOUT = 600        # agent 提问选择卡片等用户回答的最长秒数，超时告知 agent 自行判断
 ASK_USER_HOLD_SECONDS = 3600  # 用户点「取消倒计时」后再等这么久（要小于 chat_mcp 里 ask_user 的 HTTP 超时）
+USAGE_WARN_PCT = 80           # Session(5h) 订阅用量预警阈值（%）——默认值，设置里滑杆可调（存 db.meta）
+USAGE_POLL_SECONDS = 180      # 用量轮询间隔（秒）——默认值，设置里滑杆可调（存 db.meta）
 UPLOAD_MAX_BYTES = 30 * 1024 * 1024  # 单个聊天附件上限
 PASTE_DOC_THRESHOLD = 1500    # 粘贴文本超过这么多字符就自动转成"临时文档"附件（前端用，放这里做单一事实源）
 

@@ -543,6 +543,7 @@ async function refreshLists() {
   S.permissions = st.permissions;
   S.defaults = st.defaults;
   S.auth = st.auth || null;
+  S.usageMonitor = st.usage_monitor || null;
   renderAuthBar();
   if (S.tab === "discover") {
     const d = await api("/api/convs?scope=all");
@@ -591,6 +592,19 @@ function connectWS() {
     } else if (d.t === "ask_done") {
       removeAskCard(d.id);
       if (d.reason === "timeout") toast(`${d.agent || ""}: ${t("ask_timeout")}`, 1);
+    } else if (d.t === "usage_alert") {
+      S.usageMonitor = { ...(S.usageMonitor || {}), alert: d.alert };
+      if (d.alert && d.fresh) {
+        const msg = t("usage_alert_toast").replace("{p}", Math.round(d.alert.pct));
+        toast(msg, 1);
+        notify(0, "AgentChat", msg);
+      }
+    } else if (d.t === "usage_fail") {
+      S.usageMonitor = { ...(S.usageMonitor || {}), failing: d.failing };
+      if (d.failing) {
+        toast(`⚠ ${t("usage_fail_note")}`, 1);
+        notify(0, "AgentChat", t("usage_fail_note"));
+      }
     } else if (d.t === "ask_hold") {
       const card = $("ask" + d.id);
       if (card) {
@@ -1070,6 +1084,32 @@ async function newLibFile() {
 
 // ---------------- 设置弹窗 ----------------
 
+// ---------------- 用量预警设置（Session 5h 滑杆） ----------------
+
+function fmtPollSec(v) {
+  return v % 60 === 0 ? `${v / 60} ${t("minutes")}` : `${v}s`;
+}
+
+function renderUsageWarnSettings() {
+  const m = S.usageMonitor || {};
+  $("stWarnPct").value = m.warn_pct || 80;
+  $("stPollSec").value = m.poll_secs || 180;
+  $("stWarnPctV").textContent = `${$("stWarnPct").value}%`;
+  $("stPollSecV").textContent = fmtPollSec(+$("stPollSec").value);
+  const fail = $("stUsageFail");
+  fail.classList.toggle("hidden", !m.failing);
+  if (m.failing) fail.textContent = `⚠ ${t("usage_fail_note")}`;
+}
+
+async function saveUsageWarnSettings() {
+  try {
+    const r = await api("/api/usage_settings", {
+      warn_pct: +$("stWarnPct").value, poll_secs: +$("stPollSec").value,
+    });
+    S.usageMonitor = { ...(S.usageMonitor || {}), ...r };
+  } catch (e) { toast(e.message, 1); }
+}
+
 function usageBarHtml(label, pct, resetText) {
   const cls = pct >= 90 ? "danger" : pct >= 70 ? "warn" : "";
   return `<div class="u-row"><span class="u-label">${esc(label)}</span>` +
@@ -1089,6 +1129,7 @@ function fmtReset(iso) {
 async function openSettings() {
   $("stTheme").value = S.theme;
   $("stLang").value = S.lang;
+  renderUsageWarnSettings();
   $("stUsage").innerHTML = $("stLocal").innerHTML = $("stSkills").innerHTML =
     `<span class="muted">…</span>`;
   openModal("modalSettings");
@@ -1347,6 +1388,11 @@ function bind() {
   // 提问浮层：收起成小徽标 / 点徽标展开
   $("askCollapse").onclick = () => { S.askCollapsed = true; renderAskOverlay(); };
   $("askBadge").onclick = () => { S.askCollapsed = false; renderAskOverlay(); };
+
+  // 用量预警滑杆：拖动实时显示数值，松手保存
+  $("stWarnPct").oninput = () => { $("stWarnPctV").textContent = `${$("stWarnPct").value}%`; };
+  $("stPollSec").oninput = () => { $("stPollSecV").textContent = fmtPollSec(+$("stPollSec").value); };
+  $("stWarnPct").onchange = $("stPollSec").onchange = saveUsageWarnSettings;
 
   // 附件：📎按钮 / 拖拽 / 粘贴
   $("btnAttach").onclick = () => $("fileInput").click();

@@ -51,6 +51,18 @@ def subscription_usage():
     return data
 
 
+def session_usage():
+    """取 Session(5h) 窗口那一行 {label, utilization, resets_at}；查询失败返回 None。
+    给用量预警监控用——它只关心 5 小时窗口。"""
+    rows = subscription_usage()
+    if not rows:
+        return None
+    for r in rows:
+        if r["key"].startswith(("session", "five_hour")):
+            return r
+    return None
+
+
 KIND_LABELS = {
     "session": "Session (5h)",
     "weekly_all": "Weekly (7d)",

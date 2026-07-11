@@ -163,6 +163,15 @@
     </label>
     <div class="sect" data-i18n="usage_sub">订阅用量</div>
     <div id="stUsage" class="usage-box"></div>
+    <div id="stUsageFail" class="usage-fail hidden"></div>
+    <!-- Session(5h) 用量预警：到阈值给正在干活的 agent 捎收尾提醒 -->
+    <div class="sect" data-i18n="usage_warn_sect">用量预警（Session 5h）</div>
+    <div class="usage-box">
+      <label class="slider-row"><span data-i18n="warn_threshold">预警阈值</span>
+        <input type="range" id="stWarnPct" min="30" max="95" step="5"><b id="stWarnPctV"></b></label>
+      <label class="slider-row"><span data-i18n="poll_interval">查询间隔</span>
+        <input type="range" id="stPollSec" min="60" max="900" step="60"><b id="stPollSecV"></b></label>
+    </div>
     <div class="sect" data-i18n="usage_local">本系统消耗（近 5 小时）</div>
     <div id="stLocal" class="usage-box"></div>
     <div class="sect" data-i18n="skills_lib">技能库</div>

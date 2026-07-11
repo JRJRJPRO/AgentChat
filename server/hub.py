@@ -18,7 +18,7 @@ import sys
 import time
 import uuid
 
-from . import auth, config, db, memories, prompts
+from . import auth, config, db, memories, prompts, usage
 
 
 class Hub:
@@ -33,6 +33,9 @@ class Hub:
         self.chain_notified = set()  # 已经广播过"链长暂停"的会话，避免刷屏
         self.activity = {}       # agent_id -> 本轮唤醒的过程动态 [{ts,k,...}]（只进内存和界面，不进聊天记录）
         self.auth_needed = None  # 登录失效时 {"agent","detail","ts"}；置位期间暂停一切唤醒
+        self.usage_alert = None  # Session(5h) 用量过阈值时 {"pct","resets_at","threshold"}
+        self.usage_note_sent = set()  # 本轮预警期内已捎过收尾提醒的 agent_id
+        self.usage_failing = False    # 用量接口连续查询失败（格式变了/网络断了），要让用户知道
         self.claude = shutil.which("claude")
         self.git_bash = self._find_git_bash()  # Windows 上 claude 需要 git-bash
 
@@ -96,6 +99,75 @@ class Hub:
             await self.broadcast({"t": "auth", "needed": False})
         self.fails.clear()
         self.poke()
+
+    # ---------- 订阅用量预警（Session 5h） ----------
+
+    async def usage_monitor(self):
+        """后台轮询订阅用量（纯元数据接口，零 token 成本）。过阈值就置预警：
+        正在干活的 agent 经工具捎带收到收尾提醒，新唤醒的写进唤醒词；
+        窗口重置（resets_at 一变）自动解除。连续查询失败 3 次要让用户知道（接口格式可能变了）。"""
+        fails = 0
+        while True:
+            row = await asyncio.to_thread(usage.session_usage)
+            if row is None:
+                fails += 1
+                if fails >= 3 and not self.usage_failing:
+                    self.usage_failing = True
+                    await self.broadcast({"t": "usage_fail", "failing": True})
+            else:
+                fails = 0
+                if self.usage_failing:
+                    self.usage_failing = False
+                    await self.broadcast({"t": "usage_fail", "failing": False})
+                pct = row.get("utilization") or 0
+                if pct >= self.usage_warn_pct():
+                    fresh = not self.usage_alert or self.usage_alert.get("resets_at") != row.get("resets_at")
+                    if fresh:
+                        self.usage_note_sent.clear()
+                    self.usage_alert = {"pct": pct, "resets_at": row.get("resets_at"),
+                                        "threshold": self.usage_warn_pct()}
+                    await self.broadcast({"t": "usage_alert", "alert": self.usage_alert, "fresh": fresh})
+                elif self.usage_alert:  # 窗口重置回落 / 用户调高了阈值
+                    self.usage_alert = None
+                    self.usage_note_sent.clear()
+                    await self.broadcast({"t": "usage_alert", "alert": None})
+            await asyncio.sleep(max(60, self.usage_poll_secs()))
+
+    @staticmethod
+    def usage_warn_pct():
+        try:
+            return int(db.get_meta("usage_warn_pct", config.USAGE_WARN_PCT))
+        except (TypeError, ValueError):
+            return config.USAGE_WARN_PCT
+
+    @staticmethod
+    def usage_poll_secs():
+        try:
+            return int(db.get_meta("usage_poll_secs", config.USAGE_POLL_SECONDS))
+        except (TypeError, ValueError):
+            return config.USAGE_POLL_SECONDS
+
+    def usage_note(self, aid):
+        """预警期间给正在干活的 agent 的收尾提醒（搭工具返回值，每个预警期每人只捎一次）。"""
+        if not self.usage_alert or aid in self.usage_note_sent:
+            return ""
+        self.usage_note_sent.add(aid)
+        return "\n\n" + self._usage_text()
+
+    def _usage_text(self):
+        a = self.usage_alert
+        reset = a.get("resets_at")
+        # 接口给的是 ISO 字符串（UTC）或数值时间戳，统一转本地时刻显示
+        if isinstance(reset, str):
+            try:
+                from datetime import datetime
+                reset = datetime.fromisoformat(reset).astimezone().timestamp()
+            except ValueError:
+                reset = None
+        reset = f"，{time.strftime('%H:%M', time.localtime(reset))} 重置" if isinstance(reset, (int, float)) else ""
+        return (f"【系统提醒】Claude 订阅 Session(5h) 用量已达 {a['pct']:.0f}%"
+                f"（预警阈值 {a['threshold']}%{reset}）。请尽快把手头工作收到一个可交付的段落并汇报，"
+                "不要开启新的大任务。")
 
     # ---------- 主循环 ----------
 
@@ -161,6 +233,8 @@ class Hub:
         first = not agent["bootstrapped"]
         blocks = [prompts.batch_block(b["conv"], b["member_names"], b["msgs"]) for b in pend["batches"]]
         prompt = prompts.wake_prompt(agent, blocks, first, interrupted=aid in self.interrupted)
+        if self.usage_alert:  # 预警期间新唤醒的，开工前就知道要节制
+            prompt += "\n\n" + self._usage_text()
         self.interrupted.discard(aid)
 
         cfg_path = self._write_mcp_config(agent)

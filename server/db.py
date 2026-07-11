@@ -157,6 +157,17 @@ def _exec(sql, args=()):
         return cur.lastrowid
 
 
+# ---------------- meta（键值设置） ----------------
+
+def get_meta(key, default=None):
+    r = _row("SELECT value FROM meta WHERE key=?", (key,))
+    return r["value"] if r else default
+
+
+def set_meta(key, value):
+    _exec("INSERT OR REPLACE INTO meta VALUES(?,?)", (key, str(value)))
+
+
 # ---------------- agents ----------------
 
 def create_agent(name, cwd, model, permission, memo=""):

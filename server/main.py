@@ -733,7 +733,9 @@ async def _tool_dispatch(agent, tool, args):
         cid = int(args["conversation_id"])
         if not db.is_member(cid, "agent", aid):
             raise ToolError(f"你不在会话 {cid} 里")
-        msgs, has_more = db.list_messages(cid, args.get("before_id") or None, int(args.get("limit") or 30))
+        # include_notes=False：观察层记录（思考留痕/系统提醒）只给用户看，不进模型上下文
+        msgs, has_more = db.list_messages(cid, args.get("before_id") or None, int(args.get("limit") or 30),
+                                          include_notes=False)
         out = [{"id": m["id"], "sender": m["sender"] or "(系统)",
                 "time": time.strftime("%m-%d %H:%M", time.localtime(m["created_at"])),
                 "text": m["content"]} for m in msgs]
@@ -842,7 +844,7 @@ async def internal_tool(payload: dict = Body(...)):
         return JSONResponse({"ok": True, "result": result})
     try:
         result = await _tool_dispatch(agent, tool, payload.get("args") or {})
-        extra = _piggyback(agent) + hub.usage_note(agent["id"])
+        extra = _piggyback(agent) + await hub.usage_note(agent["id"])
         if extra:
             if not isinstance(result, str):
                 result = json.dumps(result, ensure_ascii=False, indent=1)

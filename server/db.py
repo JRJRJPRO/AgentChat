@@ -352,12 +352,20 @@ def get_message(mid):
     return m
 
 
-def list_messages(cid, before_id=None, limit=50):
-    """返回 (按 id 升序的消息列表, has_more)。before_id 用于往上翻历史。"""
+def update_message(mid, content):
+    """只给观察层 note 用：唤醒结束时把过程动态定格进占位消息。"""
+    _exec("UPDATE messages SET content=? WHERE id=?", (content, mid))
+    return get_message(mid)
+
+
+def list_messages(cid, before_id=None, limit=50, include_notes=True):
+    """返回 (按 id 升序的消息列表, has_more)。before_id 用于往上翻历史。
+    include_notes=False 给 agent 的 read_messages 用：观察层记录不进模型上下文。"""
+    note = "" if include_notes else " AND stype!='note'"
     if before_id:
-        rs = _rows("SELECT * FROM messages WHERE conv_id=? AND id<? ORDER BY id DESC LIMIT ?", (cid, before_id, limit + 1))
+        rs = _rows(f"SELECT * FROM messages WHERE conv_id=? AND id<?{note} ORDER BY id DESC LIMIT ?", (cid, before_id, limit + 1))
     else:
-        rs = _rows("SELECT * FROM messages WHERE conv_id=? ORDER BY id DESC LIMIT ?", (cid, limit + 1))
+        rs = _rows(f"SELECT * FROM messages WHERE conv_id=?{note} ORDER BY id DESC LIMIT ?", (cid, limit + 1))
     has_more = len(rs) > limit
     rs = rs[:limit]
     names = agent_names()
@@ -430,7 +438,8 @@ def conv_summary(conv, viewer=USER):
     else:
         display = conv["name"] or "群聊"
 
-    last = _row("SELECT * FROM messages WHERE conv_id=? ORDER BY id DESC LIMIT 1", (cid,))
+    # note（观察层）不参与侧栏预览和未读数：它是过程留痕，不该把会话顶亮
+    last = _row("SELECT * FROM messages WHERE conv_id=? AND stype!='note' ORDER BY id DESC LIMIT 1", (cid,))
     if last:
         last["sender"] = config.USER_NAME if last["stype"] == "user" else ("" if last["stype"] == "system" else names.get(last["sid"], ""))
 
@@ -438,7 +447,7 @@ def conv_summary(conv, viewer=USER):
     if im:
         cur = get_cursor(viewer, cid)
         unread = _row(
-            "SELECT COUNT(*) c FROM messages WHERE conv_id=? AND id>? AND NOT(stype=? AND sid=?)",
+            "SELECT COUNT(*) c FROM messages WHERE conv_id=? AND id>? AND stype!='note' AND NOT(stype=? AND sid=?)",
             (cid, cur["last_read_id"], viewer[0], viewer[1]),
         )["c"]
 
@@ -491,7 +500,8 @@ def agent_pending(agent):
     for c in convs:
         cur = get_cursor(("agent", aid), c["id"])
         msgs = _rows(
-            "SELECT * FROM messages WHERE conv_id=? AND id>? AND NOT(stype='agent' AND sid=?) ORDER BY id",
+            # stype='note' 是观察层记录（思考过程/系统提醒留痕），只给用户看，绝不派送给 agent
+            "SELECT * FROM messages WHERE conv_id=? AND id>? AND stype!='note' AND NOT(stype='agent' AND sid=?) ORDER BY id",
             (c["id"], cur["last_delivered_id"], aid),
         )
         if not msgs:

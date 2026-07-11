@@ -147,12 +147,23 @@ class Hub:
         except (TypeError, ValueError):
             return config.USAGE_POLL_SECONDS
 
-    def usage_note(self, aid):
-        """预警期间给正在干活的 agent 的收尾提醒（搭工具返回值，每个预警期每人只捎一次）。"""
+    async def usage_note(self, aid):
+        """预警期间给正在干活的 agent 的收尾提醒（搭工具返回值，每个预警期每人只捎一次）。
+        同时在该 agent 本轮的会话里留一条 ⚠ note，让用户看到"系统提醒过它了"。"""
         if not self.usage_alert or aid in self.usage_note_sent:
             return ""
         self.usage_note_sent.add(aid)
+        info = self.running.get(aid) or {}
+        agent = db.get_agent(aid)
+        await self._post_usage_note(agent["name"] if agent else f"agent#{aid}", info.get("convs") or [])
         return "\n\n" + self._usage_text()
+
+    async def _post_usage_note(self, name, cids):
+        """观察层留痕：⚠ 系统已提醒某 agent 尽快收尾（只用户可见，永久保留）。"""
+        text = f"系统已提醒「{name}」：" + self._usage_text().replace("【系统提醒】", "")
+        for cid in cids:
+            m = db.post_message(cid, "note", 0, text, kind="usage")
+            await self.broadcast({"t": "msg", "conv_id": cid, "message": m})
 
     def _usage_text(self):
         a = self.usage_alert
@@ -230,11 +241,22 @@ class Hub:
             db.set_delivered(("agent", aid), cid, b["msgs"][-1]["id"])
         pend["prev_cursors"] = prev
 
+        # 观察层：在每个触发本次唤醒的会话里插一条 note 占位（💭 过程卡）。
+        # 只给用户看的时间线记录，唤醒结束时把思考/工具动态定格进去；agent 永远收不到。
+        notes = {}
+        for cid in prev:
+            m = db.post_message(cid, "note", aid, "", kind="act")
+            notes[cid] = m["id"]
+            await self.broadcast({"t": "msg", "conv_id": cid, "message": m})
+        self.running[aid]["convs"] = list(prev.keys())
+
         first = not agent["bootstrapped"]
         blocks = [prompts.batch_block(b["conv"], b["member_names"], b["msgs"]) for b in pend["batches"]]
         prompt = prompts.wake_prompt(agent, blocks, first, interrupted=aid in self.interrupted)
-        if self.usage_alert:  # 预警期间新唤醒的，开工前就知道要节制
+        if self.usage_alert:  # 预警期间新唤醒的，开工前就知道要节制；同时给用户留痕
             prompt += "\n\n" + self._usage_text()
+            self.usage_note_sent.add(aid)  # 唤醒词里带过了，工具捎带就不重复提醒了
+            await self._post_usage_note(agent["name"], list(prev.keys()))
         self.interrupted.discard(aid)
 
         cfg_path = self._write_mcp_config(agent)
@@ -314,6 +336,13 @@ class Hub:
                 await proc.wait()
                 rc = -1
                 f.write("\n# !! 超时被杀\n")
+
+        # 观察层：把本次唤醒的过程动态定格进占位 note（空动态就留空，前端不显示）
+        items = self.activity.get(aid) or []
+        content = json.dumps(items, ensure_ascii=False) if items else ""
+        for cid, mid in notes.items():
+            m = db.update_message(mid, content)
+            await self.broadcast({"t": "msg_update", "conv_id": cid, "message": m})
 
         db.record_wake(aid)
         db.add_wake(aid, started, rc, self._usage_from(result_evt), log_path)

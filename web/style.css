@@ -488,6 +488,22 @@ body.light .file-att { background: rgba(20,30,50,.05); }
 .file-chip.selected { color: var(--text); border-color: var(--accent); background: rgba(79,156,249,.15); }
 .file-chip.dim { opacity: .4; cursor: default; }
 
+/* 观察层 note：居中的过程卡/系统提醒留痕（只用户可见，agent 收不到） */
+.note-msg { display: flex; justify-content: center; margin: 8px 0; }
+.note-card {
+  max-width: min(560px, 86%); width: fit-content;
+  background: var(--panel); border: 1px dashed var(--border); border-radius: 10px;
+  padding: 8px 14px; font-size: 12px; color: var(--muted);
+}
+.note-card.usage { border-color: #c9a227; color: var(--text); }
+.note-head { font-weight: 600; opacity: .85; margin-bottom: 4px; }
+.note-time { margin-left: 10px; font-weight: 400; opacity: .6; font-size: 11px; }
+.note-toggle {
+  background: none; border: none; color: var(--accent); cursor: pointer;
+  font-size: 12px; padding: 4px 0 0; display: block;
+}
+.note-toggle:hover { text-decoration: underline; }
+
 /* 用量预警滑杆（设置弹窗） */
 .slider-row { display: flex; align-items: center; gap: 10px; margin: 6px 0; font-size: 13px; }
 .slider-row span { min-width: 72px; color: var(--muted); }

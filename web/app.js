@@ -30,6 +30,7 @@ const S = {
   models: [],
   permissions: [],
   acts: {},           // agent_id -> 本轮过程动态（思考/工具调用，只展示不进记录）
+  noteOpen: new Set(),// 已展开的观察层过程卡（note 消息 id）
   pendAtts: [],       // 待发送附件 [{kind,name,path,url,size}]
   auth: null,         // 登录失效信息（null = 正常）
 };
@@ -314,6 +315,7 @@ function attsHtml(atts) {
 }
 
 function msgHtml(m) {
+  if (m.stype === "note") return noteHtml(m);
   if (m.stype === "system") {
     return `<div class="sys-msg ${m.kind === "error" ? "error" : ""}">${esc(m.content)} · ${fmtTime(m.created_at)}</div>`;
   }
@@ -330,6 +332,38 @@ function msgHtml(m) {
     `</div></div>`
   );
 }
+
+// 观察层 note：只用户可见、永久保留在时间线里，agent 不会收到。
+// kind=usage → ⚠ 系统提醒留痕；kind=act → 💭 过程卡（跑时实时滚动，跑完定格；>2 行折叠）
+function noteHtml(m) {
+  if (m.kind === "usage") {
+    return `<div class="note-msg" data-mid="${m.id}"><div class="note-card usage">` +
+      `⚠ ${esc(m.content)}<span class="note-time">${fmtTime(m.created_at)}</span></div></div>`;
+  }
+  let items = [];
+  try { items = m.content ? JSON.parse(m.content) : []; } catch (e) { /* 老格式忽略 */ }
+  const live = !m.content && S.working.has(m.sid);
+  if (live) items = S.acts[m.sid] || [];
+  if (!items.length && !live) return "";  // 跑完了也没过程可讲：不占地方
+  const open = S.noteOpen.has(m.id);
+  const shown = open ? items : (live ? items.slice(-2) : items.slice(0, 2));
+  const toggle = items.length > 2
+    ? `<button class="note-toggle" onclick="toggleNote(${m.id})">` +
+      `${open ? esc(t("note_fold")) + " ▴" : esc(t("note_unfold").replace("{n}", items.length)) + " ▾"}</button>`
+    : "";
+  return `<div class="note-msg" data-mid="${m.id}"${live ? ` data-live="${m.sid}"` : ""}>` +
+    `<div class="note-card"><div class="note-head">💭 ${esc(m.sender)} · ` +
+    `${esc(t(live ? "note_working" : "note_done"))}<span class="note-time">${fmtTime(m.created_at)}</span></div>` +
+    (shown.map(actLineHtml).join("") || `<div class="act-line"><span class="a-note">…</span></div>`) +
+    toggle + `</div></div>`;
+}
+
+window.toggleNote = (mid) => {
+  S.noteOpen.has(mid) ? S.noteOpen.delete(mid) : S.noteOpen.add(mid);
+  const m = S.msgs.find((x) => x.id === mid);
+  const el = document.querySelector(`.note-msg[data-mid="${mid}"]`);
+  if (m && el) el.outerHTML = noteHtml(m);
+};
 
 function renderMsgs(scrollBottom) {
   const box = $("msgs");
@@ -508,21 +542,18 @@ function actLineHtml(it) {
 }
 
 function renderActs() {
-  const el = $("actFeed");
-  if (!S.cur) return el.classList.add("hidden");
-  const workers = S.cur.members.filter((m) => m.mtype === "agent" && S.working.has(m.mid));
-  let html = "";
-  for (const m of workers) {
-    const items = S.acts[m.mid] || [];
-    if (!items.length) continue;
-    html += `<div class="act-head">${esc(m.name)} · ${esc(t("act_title"))}</div>`;
-    html += items.slice(-30).map(actLineHtml).join("");
+  // v2.1 起过程动态直接进时间线的 💭 过程卡（观察层 note），原聊天区上方的黄条退役。
+  // 这里只负责刷新当前会话里正在直播的过程卡。
+  $("actFeed").classList.add("hidden");
+  if (!S.cur) return;
+  const box = $("msgs");
+  const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 120;
+  for (const m of S.msgs) {
+    if (m.stype !== "note" || m.kind !== "act" || m.content) continue;
+    const el = document.querySelector(`.note-msg[data-mid="${m.id}"]`);
+    if (el) el.outerHTML = noteHtml(m);
   }
-  if (!html) return el.classList.add("hidden");
-  const stick = el.classList.contains("hidden") || el.scrollHeight - el.scrollTop - el.clientHeight < 40;
-  el.innerHTML = html;
-  el.classList.remove("hidden");
-  if (stick) el.scrollTop = el.scrollHeight;
+  if (nearBottom) box.scrollTop = box.scrollHeight;
 }
 
 async function fetchActs(aid) {
@@ -572,13 +603,22 @@ function connectWS() {
   ws.onmessage = (ev) => {
     const d = JSON.parse(ev.data);
     if (d.t === "msg") onWsMsg(d);
-    else if (d.t === "agent") {
+    else if (d.t === "msg_update") {
+      // 观察层过程卡定格：替换消息内容并原位重绘
+      const i = S.cur && S.cur.id === d.conv_id ? S.msgs.findIndex((x) => x.id === d.message.id) : -1;
+      if (i >= 0) {
+        S.msgs[i] = d.message;
+        const el = document.querySelector(`.note-msg[data-mid="${d.message.id}"]`);
+        if (el) el.outerHTML = msgHtml(d.message);
+      }
+    } else if (d.t === "agent") {
       if (d.run === "working") { S.working.add(d.id); S.acts[d.id] = []; }
       else S.working.delete(d.id);
       const a = agentById(d.id);
       if (a) a.run = d.run;
       renderLists();
       renderTyping();
+      renderActs();  // 直播中的过程卡收尾/清理
     } else if (d.t === "act") {
       (S.acts[d.id] = S.acts[d.id] || []).push(d.item);
       if (S.acts[d.id].length > 100) S.acts[d.id].splice(0, S.acts[d.id].length - 100);
@@ -638,21 +678,24 @@ function connectWS() {
 }
 
 function onWsMsg(d) {
+  const note = d.message.stype === "note";  // 观察层：不通知、不进预览、不算未读
   const c = S.convs.find((x) => x.id === d.conv_id);
-  if (c && d.message.stype !== "user" && d.message.stype !== "system") {
+  if (c && !note && d.message.stype !== "user" && d.message.stype !== "system") {
     notify(d.conv_id, c.display_name, `${d.message.sender}: ${d.message.content}`);
   }
   if (c) {
-    c.last_msg = d.message;
-    c.last_ts = d.message.created_at;
-    const viewing = S.cur && S.cur.id === d.conv_id && document.hasFocus();
-    if (d.message.stype !== "user" && !viewing) c.unread += 1;
-    S.convs.sort((a, b) => b.last_ts - a.last_ts);
+    if (!note) {
+      c.last_msg = d.message;
+      c.last_ts = d.message.created_at;
+      const viewing = S.cur && S.cur.id === d.conv_id && document.hasFocus();
+      if (d.message.stype !== "user" && !viewing) c.unread += 1;
+      S.convs.sort((a, b) => b.last_ts - a.last_ts);
+    }
   } else {
     refreshLists(); // 新会话（agent 建群/私聊我）
   }
   const dc = S.discover.find((x) => x.id === d.conv_id);
-  if (dc) { dc.last_msg = d.message; dc.last_ts = d.message.created_at; }
+  if (dc && !note) { dc.last_msg = d.message; dc.last_ts = d.message.created_at; }
   if (S.cur && S.cur.id === d.conv_id) {
     appendMsg(d.message);
     if (document.hasFocus()) markRead();

@@ -32,7 +32,7 @@ const I18N = {
     perm_full: "full：等同 --dangerously-skip-permissions，所有工具全部免审批（含删文件、装软件、联网）。给 opus 干大项目时用这档最省心，前提是你信它。",
     wakes: "次唤醒", model: "模型",
     f_extra_dirs: "额外目录",
-    extra_dirs_ph: "逗号分隔。写/改在这些目录里也自动批准，如 C:\\Users\\JRJ\\.claude\\skills",
+    extra_dirs_ph: "逗号分隔。写/改在这些目录里也自动批准，如 C:\\Users\\<你>\\.claude\\skills",
     f_skills: "技能",
     skills_none: "技能库是空的。把技能文件夹（含 SKILL.md）放进 skills/ 目录即可出现在这里。",
     skills_global_hint: "个全局技能（~/.claude/skills）所有 agent 自动可见，无需勾选",

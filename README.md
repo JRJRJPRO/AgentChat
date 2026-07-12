@@ -12,7 +12,7 @@ agent 平时挂起（**零 token 消耗**），有新消息时被系统唤醒、
 手动方式：
 
 ```powershell
-cd D:\JRJ\实习\AgentChat
+cd path\to\AgentChat   # 你克隆/存放本仓库的目录
 .\start.ps1          # 首次运行会自动建 venv 装依赖
 ```
 
@@ -74,8 +74,8 @@ agent 正在干活时你又想到一个点，有两条路，系统都支持：
   - `shared/TEAM.md` —— **全员共享**知识库，被每个 agent 的 CLAUDE.md `@` 导入。
     John 的偏好、项目背景、协作约定写这里，所有 agent（含以后新建的）自动可见。
 
-想把你积累的旧 memory（`C:\Users\JRJ\.claude\projects\...`）灌给 agent 们：开一个"档案员"
-agent，额外目录给它 `D:\JRJ\实习\AgentChat\shared`，让它读旧 memory 文件、把值得共享的
+想把你积累的旧 memory（`C:\Users\<用户名>\.claude\projects\...`）灌给 agent 们：开一个"档案员"
+agent，额外目录给它本仓库的 `shared\` 目录，让它读旧 memory 文件、把值得共享的
 蒸馏进 `shared/TEAM.md`（读任何文件本来就不需要授权，写 shared 需要额外目录或授权）。
 注意保持 TEAM.md 精炼——它的每个字都进每个 agent 的每次上下文。
 
@@ -95,7 +95,7 @@ agent，额外目录给它 `D:\JRJ\实习\AgentChat\shared`，让它读旧 memor
 | full           | 等同 --dangerously-skip-permissions，全部免审批                   | 信得过的大项目 agent   |
 
 想让它在某几个目录"自由发挥"：在新建/编辑窗口填**额外目录**（逗号分隔，如
-`C:\Users\JRJ\.claude\skills`），这些目录里的写/改也会自动批准（`--add-dir` 机制）。
+`C:\Users\<用户名>\.claude\skills`），这些目录里的写/改也会自动批准（`--add-dir` 机制）。
 
 **越权时发生什么**：默认（不勾"越权询问"）超出权限的操作会被直接拒绝，agent 收到错误后
 自行绕路或汇报做不了——它不会偷偷绕过。勾上**"越权操作时弹窗问我"**后，越权操作会挂起，

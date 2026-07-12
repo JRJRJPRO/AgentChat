@@ -14,6 +14,7 @@ import asyncio
 import json
 import os
 import shutil
+import subprocess
 import sys
 import time
 import uuid
@@ -65,27 +66,37 @@ class Hub:
         return "working" if aid in self.running else "idle"
 
     async def stop_agent(self, aid):
-        """硬停止：杀进程，这批消息不再重发。"""
+        """硬停止：杀进程树，这批消息不再重发。"""
         info = self.running.get(aid)
         if info and info.get("proc"):
             info["stopped"] = True
-            try:
-                info["proc"].kill()
-            except ProcessLookupError:
-                pass
+            self._kill_tree(info["proc"])
 
     async def interrupt_agent(self, aid):
-        """软打断：杀进程，但消息回退重发，下次唤醒带"你被打断了"标注，
+        """软打断：杀进程树，但消息回退重发，下次唤醒带"你被打断了"标注，
         agent 借 --resume 的记忆接着干，不从头重来。"""
         info = self.running.get(aid)
         if not (info and info.get("proc")):
             return False
         info["interrupt"] = True
-        try:
-            info["proc"].kill()
-        except ProcessLookupError:
-            pass
+        self._kill_tree(info["proc"])
         return True
+
+    @staticmethod
+    def _kill_tree(proc):
+        """杀整棵进程树。Windows 上 claude 经 cmd 壳启动（.cmd 必须如此），
+        proc.kill() 只杀得掉壳，里面的 node 孤儿会继续干活、stdout 也不到 EOF——
+        这就是"点了打断/停止半天没反应"的根因。taskkill /T 连树带根一起清。"""
+        if proc is None or proc.returncode is not None:
+            return
+        try:
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                               capture_output=True, timeout=15)
+            else:
+                proc.kill()
+        except (ProcessLookupError, subprocess.TimeoutExpired, OSError):
+            pass
 
     async def chain_clear(self, cid):
         if cid in self.chain_notified:
@@ -332,7 +343,7 @@ class Hub:
                                        timeout=config.WAKE_TIMEOUT)
                 rc = proc.returncode
             except asyncio.TimeoutError:
-                proc.kill()
+                self._kill_tree(proc)
                 await proc.wait()
                 rc = -1
                 f.write("\n# !! 超时被杀\n")

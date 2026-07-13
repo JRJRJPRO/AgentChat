@@ -82,6 +82,74 @@ class Hub:
         self._kill_tree(info["proc"])
         return True
 
+    def _agent_env(self):
+        env = dict(os.environ)
+        for k in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT"):
+            env.pop(k, None)
+        env["PYTHONIOENCODING"] = "utf-8"
+        env["MCP_TOOL_TIMEOUT"] = "660000"  # ask_permission 要等用户，别被默认超时掐断
+        if self.git_bash:
+            env["CLAUDE_CODE_GIT_BASH_PATH"] = self.git_bash
+        return env
+
+    @staticmethod
+    def _ctx_from(result_evt):
+        """从 result 事件估算会话当前上下文长度：iterations[-1] 是本轮最后一次
+        API 调用，它的 input+cache读+cache写 就是模型此刻看到的全部 token 数。"""
+        u = (result_evt or {}).get("usage") or {}
+        its = u.get("iterations") or []
+        if not its:
+            return None
+        ctx = sum(its[-1].get(k, 0) for k in
+                  ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
+        mu = result_evt.get("modelUsage") or {}
+        win = max((v.get("contextWindow") or 0) for v in mu.values()) if mu else 0
+        return (ctx, win) if ctx else None
+
+    async def compact_agent(self, aid):
+        """对空闲 agent 的会话跑一次 /compact 压缩上下文。
+        无头 -p --resume 模式实测有效（58.8k → 26.6k tokens，会话继续可用）。"""
+        agent = db.get_agent(aid)
+        if not agent:
+            raise ValueError("agent 不存在")
+        if agent["status"] != "active" or not agent["bootstrapped"]:
+            raise ValueError("只有已唤醒过的在岗 agent 才能压缩")
+        if aid in self.running:
+            raise ValueError("它正在干活，等空闲后再压缩")
+        self.running[aid] = {"proc": None, "since": time.time(), "stopped": False}  # 占坑：压缩期间不被唤醒
+        await self.broadcast({"t": "agent", "id": aid, "run": "working"})
+        old = agent.get("ctx_tokens") or 0
+        log_path = os.path.join(config.LOG_DIR, f"agent{aid}_compact_{int(time.time())}.log")
+        try:
+            cmd = self._claude_cmd() + [
+                "-p", "--output-format", "json",
+                "--model", config.MODEL_IDS.get(agent["model"], agent["model"]),
+                "--resume", agent["session_id"],
+            ]
+            with open(log_path, "w", encoding="utf-8", errors="replace") as f:
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd, cwd=agent["cwd"], env=self._agent_env(),
+                    stdin=asyncio.subprocess.PIPE, stdout=f, stderr=f)
+                self.running[aid]["proc"] = proc
+                try:
+                    await asyncio.wait_for(proc.communicate(b"/compact"), timeout=600)
+                except asyncio.TimeoutError:
+                    self._kill_tree(proc)
+                    raise ValueError("压缩超时（10 分钟），已中止")
+            if proc.returncode != 0:
+                raise ValueError(f"压缩失败（rc={proc.returncode}），日志: {log_path}")
+            db.update_agent(aid, ctx_tokens=0)  # 0 = 待下次唤醒重新统计
+            await self.broadcast({"t": "ctx", "id": aid, "ctx": 0, "win": agent.get("ctx_window") or 0})
+            dm = db.ensure_dm(db.USER, ("agent", aid))
+            m = db.post_message(dm["id"], "note", 0,
+                                f"已压缩「{agent['name']}」的上下文（压缩前 ~{old // 1000}k tokens，"
+                                "新长度下次唤醒后显示）", kind="compact")
+            await self.broadcast({"t": "msg", "conv_id": dm["id"], "message": m})
+        finally:
+            self.running.pop(aid, None)
+            await self.broadcast({"t": "agent", "id": aid, "run": "idle"})
+            self.event.set()  # 压缩期间可能有消息排队
+
     @staticmethod
     def _kill_tree(proc):
         """杀整棵进程树。Windows 上 claude 经 cmd 壳启动（.cmd 必须如此），
@@ -295,13 +363,7 @@ class Hub:
         os.makedirs(agent["cwd"], exist_ok=True)
         memories.ensure_claude_md(agent)
         log_path = os.path.join(config.LOG_DIR, f"agent{aid}_{int(time.time())}.log")
-        env = dict(os.environ)
-        for k in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT"):
-            env.pop(k, None)
-        env["PYTHONIOENCODING"] = "utf-8"
-        env["MCP_TOOL_TIMEOUT"] = "660000"  # ask_permission 要等用户，别被默认超时掐断
-        if self.git_bash:
-            env["CLAUDE_CODE_GIT_BASH_PATH"] = self.git_bash
+        env = self._agent_env()
 
         await self.broadcast({"t": "agent", "id": aid, "run": "working"})
 
@@ -357,6 +419,10 @@ class Hub:
 
         db.record_wake(aid)
         db.add_wake(aid, started, rc, self._usage_from(result_evt), log_path)
+        ctxw = self._ctx_from(result_evt)  # 会话当前上下文长度，给界面显示
+        if ctxw:
+            db.update_agent(aid, ctx_tokens=ctxw[0], ctx_window=ctxw[1])
+            await self.broadcast({"t": "ctx", "id": aid, "ctx": ctxw[0], "win": ctxw[1]})
         stopped = self.running.get(aid, {}).get("stopped")
         interrupt = self.running.get(aid, {}).get("interrupt")
 

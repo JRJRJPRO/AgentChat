@@ -112,6 +112,11 @@ def _migrate():
         _exec("ALTER TABLE agents ADD COLUMN ask_perm INTEGER NOT NULL DEFAULT 0")
     if "memories" not in cols:
         _exec("ALTER TABLE agents ADD COLUMN memories TEXT NOT NULL DEFAULT ''")
+    if "ctx_tokens" not in cols:
+        # 最近一次唤醒结束时的上下文长度（result 事件 iterations[-1] 的 input+cache 读写和）；
+        # 0 = 未知/刚压缩过，等下次唤醒重新统计
+        _exec("ALTER TABLE agents ADD COLUMN ctx_tokens INTEGER NOT NULL DEFAULT 0")
+        _exec("ALTER TABLE agents ADD COLUMN ctx_window INTEGER NOT NULL DEFAULT 0")
     mcols = {r["name"] for r in _rows("PRAGMA table_info(messages)")}
     if "attachments" not in mcols:
         # 附件（图片/临时文档）存 JSON 数组：[{kind,name,path,url,size}, ...]

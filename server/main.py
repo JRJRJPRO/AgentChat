@@ -77,7 +77,18 @@ def agent_view(a):
         "extra_dirs": a.get("extra_dirs") or "", "skills": [s for s in (a.get("skills") or "").split(",") if s],
         "memories": [m for m in (a.get("memories") or "").split(",") if m],
         "ask_perm": bool(a.get("ask_perm")), "run": hub.run_state(a["id"]),
+        "ctx_tokens": a.get("ctx_tokens") or 0, "ctx_window": a.get("ctx_window") or 0,
     }
+
+
+@app.post("/api/agents/{aid}/compact")
+async def api_agent_compact(aid: int):
+    """压缩该 agent 的会话上下文（跑一次 /compact）。长上下文会让模型变笨且变贵。"""
+    try:
+        await hub.compact_agent(aid)
+    except ValueError as e:
+        err(str(e))
+    return {"ok": True}
 
 
 @app.get("/api/agents/{aid}/activity")

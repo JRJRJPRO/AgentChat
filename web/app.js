@@ -282,10 +282,48 @@ async function openConv(cid) {
   if (!S.spectate) input.focus();
 }
 
+// 长上下文会让模型变笨且变贵：私聊头部常驻显示对方 agent 的上下文长度 + 🧹压缩按钮
+function ctxText(a) {
+  if (!a || !a.ctx_tokens) return "";
+  const k = Math.round(a.ctx_tokens / 1000);
+  const pct = a.ctx_window ? Math.round(a.ctx_tokens / a.ctx_window * 100) : null;
+  return `🧠 ${k}k${pct !== null ? ` (${pct}%)` : ""}`;
+}
+
+function dmAgent(c) {
+  if (!c || c.type !== "dm") return null;
+  const m = c.members.find((x) => x.mtype === "agent");
+  return m ? agentById(m.mid) : null;
+}
+
 function renderChatHead() {
   const c = S.cur;
   $("chatTitle").textContent = c.display_name;
-  $("chatSub").textContent = c.members.map((m) => (m.mtype === "user" ? t("me") : m.name)).join("、");
+  let sub = c.members.map((m) => (m.mtype === "user" ? t("me") : m.name)).join("、");
+  const a = dmAgent(c);
+  if (a) {
+    const ct = ctxText(a);
+    if (ct) {
+      const pct = a.ctx_window ? a.ctx_tokens / a.ctx_window * 100 : 0;
+      sub += ` · ${ct}${pct >= 70 ? " ⚠" : ""}`;
+    } else if (a.wake_count) {
+      sub += ` · 🧠 ${t("ctx_fresh")}`;
+    }
+  }
+  $("chatSub").textContent = sub;
+  $("btnCompact").classList.toggle("hidden", !a);
+}
+
+async function compactCurrent() {
+  const a = dmAgent(S.cur);
+  if (!a) return;
+  $("btnCompact").disabled = true;
+  toast(t("compact_running"));
+  try {
+    await api(`/api/agents/${a.id}/compact`, {});
+    toast(t("compact_done"));
+  } catch (e) { toast(e.message, 1); }
+  $("btnCompact").disabled = false;
 }
 
 function pushMsg(m, prepend) {
@@ -336,9 +374,9 @@ function msgHtml(m) {
 // 观察层 note：只用户可见、永久保留在时间线里，agent 不会收到。
 // kind=usage → ⚠ 系统提醒留痕；kind=act → 💭 过程卡（跑时实时滚动，跑完定格；>2 行折叠）
 function noteHtml(m) {
-  if (m.kind === "usage") {
+  if (m.kind !== "act") {  // usage=⚠系统提醒留痕，compact=🧹压缩记录
     return `<div class="note-msg" data-mid="${m.id}"><div class="note-card usage">` +
-      `⚠ ${esc(m.content)}<span class="note-time">${fmtTime(m.created_at)}</span></div></div>`;
+      `${m.kind === "compact" ? "🧹" : "⚠"} ${esc(m.content)}<span class="note-time">${fmtTime(m.created_at)}</span></div></div>`;
   }
   let items = [];
   try { items = m.content ? JSON.parse(m.content) : []; } catch (e) { /* 老格式忽略 */ }
@@ -619,6 +657,10 @@ function connectWS() {
       renderLists();
       renderTyping();
       renderActs();  // 直播中的过程卡收尾/清理
+    } else if (d.t === "ctx") {
+      const a = agentById(d.id);
+      if (a) { a.ctx_tokens = d.ctx; a.ctx_window = d.win || a.ctx_window; }
+      if (S.cur && dmAgent(S.cur) && dmAgent(S.cur).id === d.id) renderChatHead();
     } else if (d.t === "act") {
       (S.acts[d.id] = S.acts[d.id] || []).push(d.item);
       if (S.acts[d.id].length > 100) S.acts[d.id].splice(0, S.acts[d.id].length - 100);
@@ -831,7 +873,8 @@ function openAgentEdit(a) {
   $("aeDirs").value = a.extra_dirs || "";
   $("aeAsk").checked = !!a.ask_perm;
   $("aePermHint").textContent = t("perm_" + a.permission);
-  $("aeInfo").textContent = `${t("f_cwd")}: ${a.cwd}`;
+  const ct = ctxText(a);
+  $("aeInfo").textContent = `${t("f_cwd")}: ${a.cwd}` + (ct ? `　${t("ctx_label")}: ${ct}` : "");
   $("aeInfo").className = "info-line";
   renderSkillChecks("aeSkills", a.skills || []);
   renderMemChecks("aeMems", a.memories || []);
@@ -1502,6 +1545,7 @@ function bind() {
   window.addEventListener("focus", () => markRead());
 
   $("btnConvInfo").onclick = openConvInfo;
+  $("btnCompact").onclick = compactCurrent;
   $("btnJoin").onclick = async () => {
     await api(`/api/convs/${S.cur.id}/members`, { join_user: true });
     openConv(S.cur.id);

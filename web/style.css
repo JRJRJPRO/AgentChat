@@ -150,11 +150,20 @@ body {
 #chat { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 
 #chatHead {
-  display: flex; align-items: center; justify-content: space-between;
+  display: flex; align-items: center; gap: 8px;
   padding: 12px 18px; border-bottom: 1px solid var(--border); background: var(--panel);
 }
+#chatHead .head-info { flex: 1; min-width: 0; }  /* 撑满剩余空间，按钮贴右边 */
 #chatHead .title { font-weight: 700; font-size: 15px; }
 #chatHead .sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
+/* 压缩上下文进行中：名字与右侧按钮之间的渐变流动小进度条，低调不抢眼 */
+#ctxProgress { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; white-space: nowrap; }
+#ctxProgress .ctx-bar {
+  width: 110px; height: 5px; border-radius: 3px; opacity: .85;
+  background: linear-gradient(90deg, var(--green), #8fd9ac, var(--green));
+  background-size: 200% 100%; animation: ctx-flow 1.6s linear infinite;
+}
+@keyframes ctx-flow { from { background-position: 200% 0; } to { background-position: 0 0; } }
 
 #banner {
   background: rgba(217,167,64,.12); color: var(--yellow); font-size: 13px;

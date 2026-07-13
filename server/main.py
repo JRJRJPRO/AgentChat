@@ -83,9 +83,10 @@ def agent_view(a):
 
 @app.post("/api/agents/{aid}/compact")
 async def api_agent_compact(aid: int):
-    """压缩该 agent 的会话上下文（跑一次 /compact）。长上下文会让模型变笨且变贵。"""
+    """开始压缩该 agent 的会话上下文（后台跑 /compact，立即返回）。
+    进度经 ws 广播，结果在私聊留观察层记录。长上下文会让模型变笨且变贵。"""
     try:
-        await hub.compact_agent(aid)
+        hub.start_compact(aid)
     except ValueError as e:
         err(str(e))
     return {"ok": True}

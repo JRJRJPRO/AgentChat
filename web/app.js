@@ -26,6 +26,7 @@ const S = {
   hasMore: false,
   loadingOlder: false,
   working: new Set(), // 正在运行的 agent id
+  compacting: new Set(), // 正在压缩上下文的 agent id（可多个同时压）
   defaults: {},
   models: [],
   permissions: [],
@@ -122,7 +123,7 @@ function avatarHtml(name, isUser, extraCls, dotCls) {
 function agentById(id) { return S.agents.find((a) => a.id === id); }
 function agentDot(a) {
   if (!a) return "";
-  if (S.working.has(a.id) || a.run === "working") return "working";
+  if (S.working.has(a.id) || S.compacting.has(a.id) || a.run === "working") return "working";
   if (a.status === "active") return "online";
   return "paused";
 }
@@ -194,8 +195,8 @@ function renderAgentList() {
   for (const a of ordered) {
     const card = document.createElement("div");
     card.className = "agent-card" + (a.status === "archived" ? " archived" : "");
-    const running = S.working.has(a.id);
-    const stText = running ? t("working") : t(a.status === "active" ? "online" : a.status);
+    const stText = S.compacting.has(a.id) ? t("compacting")
+      : S.working.has(a.id) ? t("working") : t(a.status === "active" ? "online" : a.status);
     const av = a.status === "archived"
       ? avatarHtml(a.name, false, "round archived", "")
       : avatarHtml(a.name, false, "round", agentDot(a));
@@ -284,7 +285,9 @@ async function openConv(cid) {
 
 // 长上下文会让模型变笨且变贵：私聊头部常驻显示对方 agent 的上下文长度 + 🧹压缩按钮
 function ctxText(a) {
-  if (!a || !a.ctx_tokens) return "";
+  if (!a) return "";
+  if (a.ctx_tokens === -1) return `🧹 ${t("ctx_compacted")}`;  // 刚压缩完，新长度要等下次唤醒
+  if (!a.ctx_tokens || a.ctx_tokens < 0) return "";
   const k = Math.round(a.ctx_tokens / 1000);
   const pct = a.ctx_window ? Math.round(a.ctx_tokens / a.ctx_window * 100) : null;
   return `🧠 ${k}k${pct !== null ? ` (${pct}%)` : ""}`;
@@ -301,7 +304,8 @@ function renderChatHead() {
   $("chatTitle").textContent = c.display_name;
   let sub = c.members.map((m) => (m.mtype === "user" ? t("me") : m.name)).join("、");
   const a = dmAgent(c);
-  if (a) {
+  const compacting = !!a && S.compacting.has(a.id);
+  if (a && !compacting) {
     const ct = ctxText(a);
     if (ct) {
       const pct = a.ctx_window ? a.ctx_tokens / a.ctx_window * 100 : 0;
@@ -311,19 +315,19 @@ function renderChatHead() {
     }
   }
   $("chatSub").textContent = sub;
-  $("btnCompact").classList.toggle("hidden", !a);
+  // 压缩进行中：头部（原上下文数字的位置旁）显示渐变进度条，压缩按钮先藏起来
+  if (compacting) $("ctxProgLabel").textContent = `🧹 ${t("ctx_compacting")}`;
+  $("ctxProgress").classList.toggle("hidden", !compacting);
+  $("btnCompact").classList.toggle("hidden", !a || compacting);
 }
 
 async function compactCurrent() {
   const a = dmAgent(S.cur);
-  if (!a) return;
-  $("btnCompact").disabled = true;
-  toast(t("compact_running"));
+  if (!a || S.compacting.has(a.id)) return;
   try {
-    await api(`/api/agents/${a.id}/compact`, {});
-    toast(t("compact_done"));
+    await api(`/api/agents/${a.id}/compact`, {});  // 立即返回，进度走 ws 广播
+    toast(t("compact_started"));
   } catch (e) { toast(e.message, 1); }
-  $("btnCompact").disabled = false;
 }
 
 function pushMsg(m, prepend) {
@@ -608,6 +612,7 @@ async function refreshLists() {
   S.agents = st.agents;
   S.convs = st.convs;
   S.working = new Set(st.agents.filter((a) => a.run === "working").map((a) => a.id));
+  S.compacting = new Set(st.agents.filter((a) => a.run === "compacting").map((a) => a.id));
   S.models = st.models;
   S.permissions = st.permissions;
   S.defaults = st.defaults;
@@ -650,13 +655,15 @@ function connectWS() {
         if (el) el.outerHTML = msgHtml(d.message);
       }
     } else if (d.t === "agent") {
+      S.working.delete(d.id); S.compacting.delete(d.id);
       if (d.run === "working") { S.working.add(d.id); S.acts[d.id] = []; }
-      else S.working.delete(d.id);
+      else if (d.run === "compacting") S.compacting.add(d.id);
       const a = agentById(d.id);
       if (a) a.run = d.run;
       renderLists();
       renderTyping();
       renderActs();  // 直播中的过程卡收尾/清理
+      if (S.cur) renderChatHead();  // 压缩进度条随状态出现/消失
     } else if (d.t === "ctx") {
       const a = agentById(d.id);
       if (a) { a.ctx_tokens = d.ctx; a.ctx_window = d.win || a.ctx_window; }

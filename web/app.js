@@ -195,8 +195,9 @@ function renderAgentList() {
   for (const a of ordered) {
     const card = document.createElement("div");
     card.className = "agent-card" + (a.status === "archived" ? " archived" : "");
+    const running = S.working.has(a.id);
     const stText = S.compacting.has(a.id) ? t("compacting")
-      : S.working.has(a.id) ? t("working") : t(a.status === "active" ? "online" : a.status);
+      : running ? t("working") : t(a.status === "active" ? "online" : a.status);
     const av = a.status === "archived"
       ? avatarHtml(a.name, false, "round archived", "")
       : avatarHtml(a.name, false, "round", agentDot(a));

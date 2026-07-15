@@ -67,7 +67,9 @@ class Hub:
         info = self.running.get(aid)
         if not info:
             return "idle"
-        return "compacting" if info.get("compact") else "working"
+        if info.get("compact"):
+            return "compacting"
+        return "probing" if info.get("probe") else "working"
 
     async def stop_agent(self, aid):
         """硬停止：杀进程树，这批消息不再重发。"""
@@ -129,14 +131,15 @@ class Hub:
     async def _compact_run(self, agent):
         """对空闲 agent 的会话跑一次 /compact 压缩上下文。
         无头 -p --resume 模式实测有效（58.8k → 26.6k tokens，会话继续可用）。
-        注意 /compact 这一轮的 result 事件不报 usage，压缩后的新长度要等下次唤醒才知道。"""
+        /compact 这一轮的 result 事件不报 usage，所以压缩完趁还占着坑
+        （防止和新唤醒并发写会话文件）再跑一次 /context 把新长度当场量出来。"""
         aid = agent["id"]
         await self.broadcast({"t": "agent", "id": aid, "run": "compacting"})
         old = agent.get("ctx_tokens") or 0
         if old <= 0:  # 服务器重启后还没唤醒过：从最近一次唤醒日志回填压缩前长度
             old = ((await asyncio.to_thread(self._ctx_from_log, aid)) or (0, 0))[0]
         log_path = os.path.join(config.LOG_DIR, f"agent{aid}_compact_{int(time.time())}.log")
-        err = None
+        err, new, win = None, None, 0
         try:
             cmd = self._claude_cmd() + [
                 "-p", "--output-format", "json",
@@ -155,6 +158,11 @@ class Hub:
                     err = "超时（10 分钟），已中止"
             if err is None and proc.returncode != 0:
                 err = f"claude 退出码 {proc.returncode}，日志 {os.path.basename(log_path)}"
+            if err is None:
+                try:
+                    _, new, win = await self._context_probe(agent)
+                except Exception:
+                    pass  # 量不出来就退回"待更新"，不算压缩失败
         except Exception as e:
             err = str(e)
         finally:
@@ -162,15 +170,79 @@ class Hub:
             await self.broadcast({"t": "agent", "id": aid, "run": "idle"})
             self.event.set()  # 压缩期间可能有消息排队
         if err is None:
-            db.update_agent(aid, ctx_tokens=-1)  # -1 = 已压缩，待下次唤醒重新统计
-            await self.broadcast({"t": "ctx", "id": aid, "ctx": -1, "win": agent.get("ctx_window") or 0})
-            before = f"压缩前 ~{old // 1000}k tokens，" if old > 0 else ""
-            text = f"已压缩「{agent['name']}」的上下文（{before}新长度下次唤醒后更新）"
+            before = f"~{old // 1000}k" if old > 0 else "?"
+            if new:
+                db.update_agent(aid, ctx_tokens=new, ctx_window=win, ctx_at=time.time())
+                await self.broadcast({"t": "ctx", "id": aid, "ctx": new, "win": win, "at": time.time()})
+                text = f"已压缩「{agent['name']}」的上下文：{before} → {new // 1000}k tokens"
+            else:
+                db.update_agent(aid, ctx_tokens=-1, ctx_at=time.time())  # 探测没成，退回"待更新"
+                await self.broadcast({"t": "ctx", "id": aid, "ctx": -1,
+                                      "win": agent.get("ctx_window") or 0, "at": time.time()})
+                text = f"已压缩「{agent['name']}」的上下文（压缩前 {before}，新长度下次唤醒后更新）"
         else:
             text = f"压缩「{agent['name']}」的上下文失败：{err}"
         dm = db.ensure_dm(db.USER, ("agent", aid))
         m = db.post_message(dm["id"], "note", 0, text, kind="compact")
         await self.broadcast({"t": "msg", "conv_id": dm["id"], "message": m})
+
+    async def _context_probe(self, agent):
+        """无头跑一次 /context，返回 (构成明细 markdown, 上下文 tokens, 窗口 tokens)。
+        实测零 API 调用（duration_api_ms=0）约 3 秒；会往会话里追加 ~1k tokens 的
+        本地命令记录，代价可忽略。调用方必须已占住 running 坑。"""
+        cmd = self._claude_cmd() + [
+            "-p", "--output-format", "json",
+            "--model", config.MODEL_IDS.get(agent["model"], agent["model"]),
+            "--resume", agent["session_id"],
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, cwd=agent["cwd"], env=self._agent_env(),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        info = self.running.get(agent["id"])
+        if info is not None:
+            info["proc"] = proc
+        try:
+            out, _ = await asyncio.wait_for(proc.communicate(b"/context"), timeout=120)
+        except asyncio.TimeoutError:
+            self._kill_tree(proc)
+            raise ValueError("查询超时（2 分钟），已中止")
+        if proc.returncode != 0:
+            raise ValueError(f"claude 退出码 {proc.returncode}")
+        evt = json.loads(out.decode("utf-8", errors="replace"))
+        md = str(evt.get("result") or "")
+        # 明细开头形如 "**Tokens:** 32.8k / 1m (3%)"
+        m = re.search(r"\*\*Tokens:\*\*\s*([\d.]+)\s*([km]?)\s*/\s*([\d.]+)\s*([km]?)", md, re.I)
+        if not (md and m):
+            raise ValueError("没在输出里找到 Tokens 行（/context 格式可能变了）")
+        unit = {"k": 1000, "m": 1000000, "": 1}
+        ctx = int(float(m.group(1)) * unit[m.group(2).lower()])
+        win = int(float(m.group(3)) * unit[m.group(4).lower()])
+        return md, ctx, win
+
+    async def context_agent(self, aid):
+        """给界面用：占坑查一次上下文构成，返回明细 markdown（顺手把 ctx 数字校准）。"""
+        agent = db.get_agent(aid)
+        if not agent:
+            raise ValueError("agent 不存在")
+        if agent["status"] != "active" or not agent["bootstrapped"]:
+            raise ValueError("只有已唤醒过的在岗 agent 才能查")
+        info = self.running.get(aid)
+        if info:
+            raise ValueError("它正在压缩，稍等" if info.get("compact") else
+                             "正在查了" if info.get("probe") else "它正在干活，等空闲后再查")
+        self.running[aid] = {"proc": None, "since": time.time(),
+                             "stopped": False, "probe": True}
+        await self.broadcast({"t": "agent", "id": aid, "run": "probing"})
+        try:
+            md, ctx, win = await self._context_probe(agent)
+            db.update_agent(aid, ctx_tokens=ctx, ctx_window=win, ctx_at=time.time())
+            await self.broadcast({"t": "ctx", "id": aid, "ctx": ctx, "win": win, "at": time.time()})
+            return md
+        finally:
+            self.running.pop(aid, None)
+            await self.broadcast({"t": "agent", "id": aid, "run": "idle"})
+            self.event.set()
 
     def _scan_logs(self, aid):
         """列出该 agent 的唤醒日志（新→旧）和最近一次压缩日志的时间戳。"""
@@ -223,12 +295,13 @@ class Hub:
                 continue
             aid = a["id"]
             ctxw = self._ctx_from_log(aid)
+            wakes, last_comp = self._scan_logs(aid)
             if ctxw:
-                db.update_agent(aid, ctx_tokens=ctxw[0], ctx_window=ctxw[1])
-            else:
-                wakes, last_comp = self._scan_logs(aid)
-                if last_comp and (not wakes or last_comp > wakes[0][0]):
-                    db.update_agent(aid, ctx_tokens=-1)  # 压缩后还没醒过：标"已压缩待更新"
+                # 统计时刻 = 那次唤醒日志的时间戳（文件名里是开始时间，够近了）
+                db.update_agent(aid, ctx_tokens=ctxw[0], ctx_window=ctxw[1],
+                                ctx_at=wakes[0][0] if wakes else 0)
+            elif last_comp and (not wakes or last_comp > wakes[0][0]):
+                db.update_agent(aid, ctx_tokens=-1, ctx_at=last_comp)  # 压缩后还没醒过
 
     @staticmethod
     def _kill_tree(proc):
@@ -502,8 +575,9 @@ class Hub:
         db.add_wake(aid, started, rc, self._usage_from(result_evt), log_path)
         ctxw = self._ctx_from(result_evt)  # 会话当前上下文长度，给界面显示
         if ctxw:
-            db.update_agent(aid, ctx_tokens=ctxw[0], ctx_window=ctxw[1])
-            await self.broadcast({"t": "ctx", "id": aid, "ctx": ctxw[0], "win": ctxw[1]})
+            db.update_agent(aid, ctx_tokens=ctxw[0], ctx_window=ctxw[1], ctx_at=time.time())
+            await self.broadcast({"t": "ctx", "id": aid, "ctx": ctxw[0], "win": ctxw[1],
+                                  "at": time.time()})
         stopped = self.running.get(aid, {}).get("stopped")
         interrupt = self.running.get(aid, {}).get("interrupt")
 

@@ -164,6 +164,18 @@ body {
   background-size: 200% 100%; animation: ctx-flow 1.6s linear infinite;
 }
 @keyframes ctx-flow { from { background-position: 200% 0; } to { background-position: 0 0; } }
+/* 📊 上下文构成弹窗：/context 输出的分类表格 */
+.ctx-report { max-height: 60vh; overflow-y: auto; font-size: 13px; }
+.ctx-report h4 { margin: 10px 0 6px; font-size: 14px; }
+.ctx-report h5 { margin: 10px 0 4px; font-size: 13px; color: var(--muted); }
+.ctx-report p { margin: 4px 0; }
+.ctx-report .muted { color: var(--muted); }
+.ctx-report table { border-collapse: collapse; width: 100%; margin: 4px 0 10px; }
+.ctx-report th, .ctx-report td {
+  border: 1px solid var(--border); padding: 4px 8px; text-align: left;
+  font-variant-numeric: tabular-nums; word-break: break-all;
+}
+.ctx-report th { background: var(--panel2); font-weight: 600; }
 
 #banner {
   background: rgba(217,167,64,.12); color: var(--yellow); font-size: 13px;

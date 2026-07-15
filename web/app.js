@@ -27,6 +27,7 @@ const S = {
   loadingOlder: false,
   working: new Set(), // 正在运行的 agent id
   compacting: new Set(), // 正在压缩上下文的 agent id（可多个同时压）
+  probing: new Set(),  // 正在查上下文构成（/context 探测，约 3-5 秒）的 agent id
   defaults: {},
   models: [],
   permissions: [],
@@ -123,7 +124,7 @@ function avatarHtml(name, isUser, extraCls, dotCls) {
 function agentById(id) { return S.agents.find((a) => a.id === id); }
 function agentDot(a) {
   if (!a) return "";
-  if (S.working.has(a.id) || S.compacting.has(a.id) || a.run === "working") return "working";
+  if (S.working.has(a.id) || S.compacting.has(a.id) || S.probing.has(a.id) || a.run === "working") return "working";
   if (a.status === "active") return "online";
   return "paused";
 }
@@ -197,6 +198,7 @@ function renderAgentList() {
     card.className = "agent-card" + (a.status === "archived" ? " archived" : "");
     const running = S.working.has(a.id);
     const stText = S.compacting.has(a.id) ? t("compacting")
+      : S.probing.has(a.id) ? t("probing")
       : running ? t("working") : t(a.status === "active" ? "online" : a.status);
     const av = a.status === "archived"
       ? avatarHtml(a.name, false, "round archived", "")
@@ -275,6 +277,7 @@ async function openConv(cid) {
   for (const m of d.conv.members) {
     if (m.mtype === "agent" && S.working.has(m.mid)) fetchActs(m.mid);
   }
+  autoProbe(d.conv);  // 私聊对方没有上下文数字时，悄悄量一次
   $("composer").classList.toggle("hidden", S.spectate);
   $("spectateBar").classList.toggle("hidden", !S.spectate);
   const input = $("input");
@@ -287,11 +290,13 @@ async function openConv(cid) {
 // 长上下文会让模型变笨且变贵：私聊头部常驻显示对方 agent 的上下文长度 + 🧹压缩按钮
 function ctxText(a) {
   if (!a) return "";
-  if (a.ctx_tokens === -1) return `🧹 ${t("ctx_compacted")}`;  // 刚压缩完，新长度要等下次唤醒
+  if (a.ctx_tokens === -1) return `🧹 ${t("ctx_compacted")}`;  // 刚压缩完还没量出新长度
   if (!a.ctx_tokens || a.ctx_tokens < 0) return "";
   const k = Math.round(a.ctx_tokens / 1000);
   const pct = a.ctx_window ? Math.round(a.ctx_tokens / a.ctx_window * 100) : null;
-  return `🧠 ${k}k${pct !== null ? ` (${pct}%)` : ""}`;
+  // 长度只在唤醒/压缩/📊查询时变化，时间戳告诉用户"这个数是什么时候量的"
+  const at = a.ctx_at ? t("ctx_asof").replace("{t}", fmtTime(a.ctx_at)) : "";
+  return `🧠 ${k}k${pct !== null ? ` (${pct}%)` : ""}${at}`;
 }
 
 function dmAgent(c) {
@@ -305,8 +310,8 @@ function renderChatHead() {
   $("chatTitle").textContent = c.display_name;
   let sub = c.members.map((m) => (m.mtype === "user" ? t("me") : m.name)).join("、");
   const a = dmAgent(c);
-  const compacting = !!a && S.compacting.has(a.id);
-  if (a && !compacting) {
+  const busy = !!a && (S.compacting.has(a.id) || S.probing.has(a.id));
+  if (a && !busy) {
     const ct = ctxText(a);
     if (ct) {
       const pct = a.ctx_window ? a.ctx_tokens / a.ctx_window * 100 : 0;
@@ -316,10 +321,14 @@ function renderChatHead() {
     }
   }
   $("chatSub").textContent = sub;
-  // 压缩进行中：头部（原上下文数字的位置旁）显示渐变进度条，压缩按钮先藏起来
-  if (compacting) $("ctxProgLabel").textContent = `🧹 ${t("ctx_compacting")}`;
-  $("ctxProgress").classList.toggle("hidden", !compacting);
-  $("btnCompact").classList.toggle("hidden", !a || compacting);
+  // 压缩/统计进行中：头部（原上下文数字的位置旁）显示渐变进度条，两个按钮先藏起来
+  if (busy) {
+    $("ctxProgLabel").textContent = S.compacting.has(a.id)
+      ? `🧹 ${t("ctx_compacting")}` : `📊 ${t("ctx_probing")}`;
+  }
+  $("ctxProgress").classList.toggle("hidden", !busy);
+  $("btnCompact").classList.toggle("hidden", !a || busy);
+  $("btnCtx").classList.toggle("hidden", !a || busy);
 }
 
 async function compactCurrent() {
@@ -329,6 +338,54 @@ async function compactCurrent() {
     await api(`/api/agents/${a.id}/compact`, {});  // 立即返回，进度走 ws 广播
     toast(t("compact_started"));
   } catch (e) { toast(e.message, 1); }
+}
+
+// ---------------- 上下文构成（📊 无头 /context，零 API 调用） ----------------
+
+// /context 输出是带表格的 markdown，mdlite 不认表格，这里专门渲染
+function ctxReportHtml(md) {
+  const lines = md.split("\n");
+  let out = "", tbl = null;
+  const flush = () => { if (tbl) { out += tbl + "</table>"; tbl = null; } };
+  for (const ln of lines) {
+    const s = ln.trim();
+    if (s.startsWith("|")) {
+      const cells = s.split("|").slice(1, -1).map((c) => c.trim());
+      if (cells.every((c) => /^:?-+:?$/.test(c))) continue;  // 表头分隔行
+      const tag = tbl ? "td" : "th";
+      if (!tbl) tbl = "<table>";
+      tbl += "<tr>" + cells.map((c) => `<${tag}>${mdlite(c)}</${tag}>`).join("") + "</tr>";
+    } else {
+      flush();
+      if (s.startsWith("### ")) out += `<h5>${esc(s.slice(4))}</h5>`;
+      else if (s.startsWith("## ")) out += `<h4>${esc(s.slice(3))}</h4>`;
+      else if (s) out += `<p>${mdlite(s)}</p>`;
+    }
+  }
+  flush();
+  return out;
+}
+
+async function ctxReportCurrent() {
+  const a = dmAgent(S.cur);
+  if (!a || S.probing.has(a.id)) return;
+  $("ctxReport").innerHTML = `<p class="muted">${esc(t("ctx_probing"))}</p>`;
+  openModal("modalCtx");
+  try {
+    const r = await api(`/api/agents/${a.id}/context`, {});
+    $("ctxReport").innerHTML = ctxReportHtml(r.report);
+  } catch (e) {
+    $("ctxReport").innerHTML = `<p class="muted">${esc(e.message)}</p>`;
+  }
+}
+
+// 打开私聊时的智能补数：有数字就不动（两次唤醒之间不会变），
+// 没数字（待统计/刚压缩完）且它空闲，才悄悄跑一次 /context 量出来
+function autoProbe(c) {
+  const a = dmAgent(c);
+  if (!a || a.status !== "active" || !a.wake_count || a.ctx_tokens > 0) return;
+  if (S.working.has(a.id) || S.compacting.has(a.id) || S.probing.has(a.id)) return;
+  api(`/api/agents/${a.id}/context`, {}).catch(() => {});  // 结果走 ws ctx 广播
 }
 
 function pushMsg(m, prepend) {
@@ -614,6 +671,7 @@ async function refreshLists() {
   S.convs = st.convs;
   S.working = new Set(st.agents.filter((a) => a.run === "working").map((a) => a.id));
   S.compacting = new Set(st.agents.filter((a) => a.run === "compacting").map((a) => a.id));
+  S.probing = new Set(st.agents.filter((a) => a.run === "probing").map((a) => a.id));
   S.models = st.models;
   S.permissions = st.permissions;
   S.defaults = st.defaults;
@@ -656,9 +714,10 @@ function connectWS() {
         if (el) el.outerHTML = msgHtml(d.message);
       }
     } else if (d.t === "agent") {
-      S.working.delete(d.id); S.compacting.delete(d.id);
+      S.working.delete(d.id); S.compacting.delete(d.id); S.probing.delete(d.id);
       if (d.run === "working") { S.working.add(d.id); S.acts[d.id] = []; }
       else if (d.run === "compacting") S.compacting.add(d.id);
+      else if (d.run === "probing") S.probing.add(d.id);
       const a = agentById(d.id);
       if (a) a.run = d.run;
       renderLists();
@@ -667,7 +726,7 @@ function connectWS() {
       if (S.cur) renderChatHead();  // 压缩进度条随状态出现/消失
     } else if (d.t === "ctx") {
       const a = agentById(d.id);
-      if (a) { a.ctx_tokens = d.ctx; a.ctx_window = d.win || a.ctx_window; }
+      if (a) { a.ctx_tokens = d.ctx; a.ctx_window = d.win || a.ctx_window; a.ctx_at = d.at || 0; }
       if (S.cur && dmAgent(S.cur) && dmAgent(S.cur).id === d.id) renderChatHead();
     } else if (d.t === "act") {
       (S.acts[d.id] = S.acts[d.id] || []).push(d.item);
@@ -1554,6 +1613,7 @@ function bind() {
 
   $("btnConvInfo").onclick = openConvInfo;
   $("btnCompact").onclick = compactCurrent;
+  $("btnCtx").onclick = ctxReportCurrent;
   $("btnJoin").onclick = async () => {
     await api(`/api/convs/${S.cur.id}/members`, { join_user: true });
     openConv(S.cur.id);

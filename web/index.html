@@ -54,6 +54,7 @@
         </div>
         <!-- 压缩进行中的头部动画：文字 + 渐变流动小进度条（低调、不抢注意力） -->
         <div id="ctxProgress" class="hidden"><span id="ctxProgLabel"></span><span class="ctx-bar"></span></div>
+        <button id="btnCtx" class="icon-btn hidden" title="查看上下文构成（/context，零 token）">📊</button>
         <button id="btnCompact" class="icon-btn hidden" title="压缩该 agent 的上下文">🧹</button>
         <button id="btnConvInfo" class="icon-btn">⋯</button>
       </header>
@@ -181,6 +182,15 @@
     <div id="stSkills" class="usage-box"></div>
     <div class="modal-btns">
       <button class="btn-danger" id="stShutdown" data-i18n="shutdown">关闭服务器</button>
+      <button class="btn-ghost" data-close data-i18n="close">关闭</button>
+    </div>
+  </div>
+
+  <!-- 上下文构成（📊 无头 /context 的输出） -->
+  <div class="modal hidden" id="modalCtx">
+    <h3 data-i18n="ctx_report">上下文构成</h3>
+    <div id="ctxReport" class="ctx-report"></div>
+    <div class="modal-btns">
       <button class="btn-ghost" data-close data-i18n="close">关闭</button>
     </div>
   </div>

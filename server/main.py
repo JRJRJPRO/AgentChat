@@ -78,6 +78,7 @@ def agent_view(a):
         "memories": [m for m in (a.get("memories") or "").split(",") if m],
         "ask_perm": bool(a.get("ask_perm")), "run": hub.run_state(a["id"]),
         "ctx_tokens": a.get("ctx_tokens") or 0, "ctx_window": a.get("ctx_window") or 0,
+        "ctx_at": a.get("ctx_at") or 0,
     }
 
 
@@ -90,6 +91,17 @@ async def api_agent_compact(aid: int):
     except ValueError as e:
         err(str(e))
     return {"ok": True}
+
+
+@app.post("/api/agents/{aid}/context")
+async def api_agent_context(aid: int):
+    """查该 agent 会话的上下文构成（无头跑 /context，零 API 调用，约 3-5 秒）。
+    返回明细 markdown，顺手把 ctx 数字校准并广播。"""
+    try:
+        report = await hub.context_agent(aid)
+    except ValueError as e:
+        err(str(e))
+    return {"ok": True, "report": report}
 
 
 @app.get("/api/agents/{aid}/activity")

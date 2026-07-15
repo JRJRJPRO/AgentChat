@@ -342,6 +342,47 @@ async function compactCurrent() {
 
 // ---------------- 上下文构成（📊 无头 /context，零 API 调用） ----------------
 
+// 从 /context 输出的"Estimated usage by category"表里抠出 [{name, tok}]
+function parseCtxCats(md) {
+  const sec = md.split(/###\s*Estimated usage by category/i)[1];
+  if (!sec) return null;
+  const rows = [];
+  for (const ln of sec.split("\n")) {
+    const s = ln.trim();
+    if (!s.startsWith("|")) { if (rows.length) break; continue; }
+    const c = s.split("|").slice(1, -1).map((x) => x.trim());
+    const m = c.length >= 2 && /^([\d.]+)\s*([km]?)$/i.exec(c[1]);
+    if (m) rows.push({ name: c[0], tok: parseFloat(m[1]) * ({ k: 1e3, m: 1e6 }[m[2].toLowerCase()] || 1) });
+  }
+  return rows.length ? rows : null;
+}
+
+function fmtTok(n) {
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + "m";
+  if (n >= 1e3) return (n >= 1e4 ? Math.round(n / 1e3) : (n / 1e3).toFixed(1)) + "k";
+  return String(Math.round(n));
+}
+
+// 图表两条：上=占满度量表（窗口用了多少），下=已用部分的构成堆叠条+图例。
+// 类目色按固定槽位顺序取（.ctxc-1..8，已过 CVD/对比度验证），配 2px 分隔与悬停提示
+function ctxChartHtml(rows) {
+  if (!rows) return "";
+  const used = rows.filter((r) => !/^free space$/i.test(r.name));
+  const total = rows.reduce((n, r) => n + r.tok, 0);
+  const usedTok = used.reduce((n, r) => n + r.tok, 0);
+  if (!total || !usedTok || !used.length) return "";
+  let h = `<div class="ctx-meter"><i style="width:${Math.max(0.5, usedTok / total * 100).toFixed(1)}%"></i></div>` +
+    `<div class="ctx-meter-lab"><span>${esc(t("ctx_used"))} ${fmtTok(usedTok)} · ${Math.round(usedTok / total * 100)}%</span>` +
+    `<span>${esc(t("ctx_free"))} ${fmtTok(total - usedTok)}</span></div>`;
+  const segs = used.map((r, i) => ({ ...r, cls: `ctxc-${(i % 8) + 1}`, share: r.tok / usedTok }));
+  h += `<div class="ctx-stack">` + segs.map((s) =>
+    `<i class="${s.cls}" style="flex-basis:${(s.share * 100).toFixed(2)}%" ` +
+    `title="${esc(s.name)} · ${fmtTok(s.tok)} · ${(s.share * 100).toFixed(s.share < 0.1 ? 1 : 0)}%"></i>`).join("") + `</div>`;
+  h += `<div class="ctx-legend">` + segs.map((s) =>
+    `<span><i class="${s.cls}"></i>${esc(s.name)} <b>${fmtTok(s.tok)}</b> · ${(s.share * 100).toFixed(s.share < 0.1 ? 1 : 0)}%</span>`).join("") + `</div>`;
+  return h;
+}
+
 // /context 输出是带表格的 markdown，mdlite 不认表格，这里专门渲染
 function ctxReportHtml(md) {
   const lines = md.split("\n");
@@ -373,7 +414,7 @@ async function ctxReportCurrent() {
   openModal("modalCtx");
   try {
     const r = await api(`/api/agents/${a.id}/context`, {});
-    $("ctxReport").innerHTML = ctxReportHtml(r.report);
+    $("ctxReport").innerHTML = ctxChartHtml(parseCtxCats(r.report)) + ctxReportHtml(r.report);
   } catch (e) {
     $("ctxReport").innerHTML = `<p class="muted">${esc(e.message)}</p>`;
   }

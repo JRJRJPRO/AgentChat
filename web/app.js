@@ -1488,9 +1488,13 @@ async function loadPendingAsks() {
 function renderAuthBar() {
   const bar = $("authBar");
   if (!S.auth) return bar.classList.add("hidden");
-  const limit = S.auth.kind === "limit";  // 订阅用量打满：不用重新登录，等重置后重试即可
-  $("authText").textContent = `⚠ ${t(limit ? "limit_needed" : "auth_needed")}` +
-    (S.auth.agent ? `（${S.auth.agent}: ${S.auth.detail || ""}）` : "");
+  const limit = S.auth.kind === "limit";  // 订阅用量打满：会自动恢复，重试按钮只是手动兜底
+  let text = `⚠ ${t(limit ? "limit_needed" : "auth_needed")}`;
+  if (limit && S.auth.resets_at) {
+    const ts = new Date(S.auth.resets_at).getTime() / 1000;
+    if (!isNaN(ts)) text += t("limit_auto_resume").replace("{t}", fmtTime(ts));
+  }
+  $("authText").textContent = text + (S.auth.agent ? `（${S.auth.agent}: ${S.auth.detail || ""}）` : "");
   $("btnAuthLogin").classList.toggle("hidden", limit);
   $("btnAuthRetry").textContent = limit ? t("retry") : t("auth_retry");
   bar.classList.remove("hidden");

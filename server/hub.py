@@ -34,7 +34,8 @@ class Hub:
         self.interrupted = set() # 被打断过、下次唤醒要带"被打断"标注的 agent
         self.chain_notified = set()  # 已经广播过"链长暂停"的会话，避免刷屏
         self.activity = {}       # agent_id -> 本轮唤醒的过程动态 [{ts,k,...}]（只进内存和界面，不进聊天记录）
-        self.auth_needed = None  # 登录失效时 {"agent","detail","ts"}；置位期间暂停一切唤醒
+        self.auth_needed = None  # 登录失效/用量打满时 {"kind","agent","detail","ts",("resets_at")}；置位期间暂停一切唤醒
+        self.auto_paused = {}    # agent_id -> 被"连续失败"自动暂停的时刻；用量窗口重置时按时间窗自动平反
         self.usage_alert = None  # Session(5h) 用量过阈值时 {"pct","resets_at","threshold"}
         self.usage_note_sent = set()  # 本轮预警期内已捎过收尾提醒的 agent_id
         self.usage_failing = False    # 用量接口连续查询失败（格式变了/网络断了），要让用户知道
@@ -325,7 +326,9 @@ class Hub:
             await self.broadcast({"t": "chain", "conv_id": cid, "paused": False})
 
     async def clear_auth(self):
-        """用户在界面上点了"已登录，重试"：解除唤醒封锁并立刻补送积压消息。"""
+        """用户在界面上点了"已登录，重试/重试"：解除唤醒封锁并立刻补送积压消息。"""
+        if (self.auth_needed or {}).get("kind") == "limit":
+            return await self._lift_limit("用量挂起已手动解除")  # 连带平反误暂停的 agent
         if self.auth_needed:
             self.auth_needed = None
             await self.broadcast({"t": "auth", "needed": False})
@@ -363,7 +366,59 @@ class Hub:
                     self.usage_alert = None
                     self.usage_note_sent.clear()
                     await self.broadcast({"t": "usage_alert", "alert": None})
-            await asyncio.sleep(max(60, self.usage_poll_secs()))
+            await self._limit_watch(row)
+            # 用量挂起期间盯得勤一点（最多 2 分钟一查），重置后能尽快自动恢复
+            secs = max(60, self.usage_poll_secs())
+            if (self.auth_needed or {}).get("kind") == "limit":
+                secs = min(secs, 120)
+            await asyncio.sleep(secs)
+
+    async def _limit_watch(self, row):
+        """用量打满的自动挂起与自动恢复（John：满了之后不该还要手动恢复）。
+        - 用量 ≥99% → 主动全局挂起：agent 根本不会去撞 429，也就不会被记失败误暂停；
+        - 挂起中检测到窗口重置（resets_at 变了 / 用量回落）→ 自动解除并补送积压消息；
+        - 接口查不到时按时间兜底：挂起超过一个 Session 窗口（5h）自动解除。"""
+        lim = self.auth_needed if (self.auth_needed or {}).get("kind") == "limit" else None
+        if row is not None:
+            pct = row.get("utilization") or 0
+            if pct >= 99 and not self.auth_needed:
+                self.auth_needed = {"kind": "limit", "agent": "",
+                                    "detail": f"Session(5h) 用量已达 {pct:.0f}%",
+                                    "ts": time.time(), "resets_at": row.get("resets_at")}
+                await self.broadcast({"t": "auth", "needed": True, **self.auth_needed})
+                return
+            if lim:
+                if not lim.get("resets_at"):
+                    lim["resets_at"] = row.get("resets_at")  # 唤醒失败路径挂起时没拿到，补上
+                elif row.get("resets_at") and row["resets_at"] != lim["resets_at"]:
+                    return await self._lift_limit("Session 用量窗口已重置")
+                if pct < 90:
+                    return await self._lift_limit("Session 用量已回落")
+        if lim and time.time() - lim["ts"] > 5 * 3600 + 600:
+            await self._lift_limit("用量挂起已超过一个 Session 窗口，按时间兜底解除")
+
+    async def _lift_limit(self, reason):
+        """解除用量挂起：清失败计数、平反挂起前后被误暂停的 agent、补送积压消息。"""
+        start = (self.auth_needed or {}).get("ts") or time.time()
+        self.auth_needed = None
+        self.fails.clear()
+        await self.broadcast({"t": "auth", "needed": False})
+        revived = False
+        for aid, ts in list(self.auto_paused.items()):
+            # 挂起前 15 分钟内的自动暂停大概率也是 429 的误伤（比如两次轮询间隙撞上的）
+            if ts >= start - 900:
+                agent = db.get_agent(aid)
+                if agent and agent["status"] == "paused":
+                    db.update_agent(aid, status="active")
+                    revived = True
+                    dm = db.ensure_dm(db.USER, ("agent", aid))
+                    m = db.post_message(dm["id"], "system", 0,
+                                        f"{reason}，已自动恢复「{agent['name']}」，积压消息将补送。")
+                    await self.broadcast({"t": "msg", "conv_id": dm["id"], "message": m})
+            self.auto_paused.pop(aid, None)
+        if revived:
+            await self.broadcast({"t": "convs_changed"})
+        self.poke()  # 挂起期间排队的消息立刻补送
 
     @staticmethod
     def usage_warn_pct():
@@ -600,6 +655,13 @@ class Hub:
                 db.update_agent(aid, session_id=str(uuid.uuid4()))
             self.auth_needed = {"kind": "auth" if auth_err else "limit",
                                 "agent": agent["name"], "detail": auth_err or limit_err, "ts": time.time()}
+            if limit_err:  # 记下重置时间：用量监控靠它判断窗口何时重置好自动恢复
+                try:
+                    row = await asyncio.to_thread(usage.session_usage)
+                    if row:
+                        self.auth_needed["resets_at"] = row.get("resets_at")
+                except Exception:
+                    pass
             await self.broadcast({"t": "auth", "needed": True, **self.auth_needed})
         elif rc == 0:
             self.fails[aid] = 0
@@ -631,9 +693,12 @@ class Hub:
         if revert:
             for cid, cur in (pend.get("prev_cursors") or {}).items():
                 db.set_delivered(("agent", aid), cid, cur)
+        if self.auth_needed:
+            return  # 全局挂起期间的失败不是 agent 的锅（多半是撞上 429），不计数不暂停，恢复后重发
         self.fails[aid] = self.fails.get(aid, 0) + 1
         if self.fails[aid] >= config.MAX_CONSEC_FAILURES:
             db.update_agent(aid, status="paused")
+            self.auto_paused[aid] = time.time()
             self.fails[aid] = 0
             dm = db.ensure_dm(db.USER, ("agent", aid))
             msg = db.post_message(dm["id"], "system", 0,

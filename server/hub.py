@@ -320,6 +320,10 @@ class Hub:
         except (ProcessLookupError, subprocess.TimeoutExpired, OSError):
             pass
 
+    async def _receipt(self, aid, cid, upto):
+        """✓ 已送达回执：该 agent 在这个会话里的投递游标动了（推进=收到，回退=收回）。"""
+        await self.broadcast({"t": "receipt", "conv_id": cid, "agent_id": aid, "upto": upto})
+
     async def chain_clear(self, cid):
         if cid in self.chain_notified:
             self.chain_notified.discard(cid)
@@ -344,11 +348,20 @@ class Hub:
         fails = 0
         while True:
             row = await asyncio.to_thread(usage.session_usage)
-            if row is None:
+            st = usage.status()
+            data_fresh = row is not None and time.time() - st["data_ts"] < 300  # 退避期的旧数据不拿来做判定
+            if st["kind"] == "rate_limited" and not data_fresh:
+                # 元数据接口自己被限流（2026-07-21 实见 429 rate_limit_error）：
+                # 不是格式坏了，退避重试就行；界面如实显示"限流中，几点重试"
+                if self.usage_failing != "rate_limited":
+                    self.usage_failing = "rate_limited"
+                    await self.broadcast({"t": "usage_fail", "failing": True,
+                                          "reason": "rate_limited", "retry_at": st["retry_at"]})
+            elif row is None:
                 fails += 1
                 if fails >= 3 and not self.usage_failing:
                     self.usage_failing = True
-                    await self.broadcast({"t": "usage_fail", "failing": True})
+                    await self.broadcast({"t": "usage_fail", "failing": True, "reason": "error"})
             else:
                 fails = 0
                 if self.usage_failing:
@@ -366,7 +379,7 @@ class Hub:
                     self.usage_alert = None
                     self.usage_note_sent.clear()
                     await self.broadcast({"t": "usage_alert", "alert": None})
-            await self._limit_watch(row)
+            await self._limit_watch(row if data_fresh else None)
             # 用量挂起期间盯得勤一点（最多 2 分钟一查），重置后能尽快自动恢复
             secs = max(60, self.usage_poll_secs())
             if (self.auth_needed or {}).get("kind") == "limit":
@@ -527,6 +540,7 @@ class Hub:
             cid = b["conv"]["id"]
             prev[cid] = db.get_cursor(("agent", aid), cid)["last_delivered_id"]
             db.set_delivered(("agent", aid), cid, b["msgs"][-1]["id"])
+            await self._receipt(aid, cid, b["msgs"][-1]["id"])  # ✓ 回执：消息进了唤醒词
         pend["prev_cursors"] = prev
 
         # 观察层：在每个触发本次唤醒的会话里插一条 note 占位（💭 过程卡）。
@@ -651,6 +665,7 @@ class Hub:
         if auth_err or limit_err:
             for cid, cur in prev.items():
                 db.set_delivered(("agent", aid), cid, cur)  # 消息回队，恢复后重发
+                await self._receipt(aid, cid, cur)  # 回执收回：其实没送进去
             if first and rc != 0:
                 db.update_agent(aid, session_id=str(uuid.uuid4()))
             self.auth_needed = {"kind": "auth" if auth_err else "limit",
@@ -678,6 +693,7 @@ class Hub:
             # 软打断：回退游标让消息（连同打断者的新话）合并重发，标注"被打断"
             for cid, cur in prev.items():
                 db.set_delivered(("agent", aid), cid, cur)
+                await self._receipt(aid, cid, cur)
             self.interrupted.add(aid)
             self.fails[aid] = 0
             if first:
@@ -693,6 +709,7 @@ class Hub:
         if revert:
             for cid, cur in (pend.get("prev_cursors") or {}).items():
                 db.set_delivered(("agent", aid), cid, cur)
+                await self._receipt(aid, cid, cur)
         if self.auth_needed:
             return  # 全局挂起期间的失败不是 agent 的锅（多半是撞上 429），不计数不暂停，恢复后重发
         self.fails[aid] = self.fails.get(aid, 0) + 1

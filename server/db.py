@@ -437,7 +437,10 @@ def conv_summary(conv, viewer=USER):
     mems = []
     for m in members_of(cid):
         nm = config.USER_NAME if m["mtype"] == "user" else names.get(m["mid"], f"agent#{m['mid']}")
-        mems.append({"mtype": m["mtype"], "mid": m["mid"], "name": nm})
+        d = {"mtype": m["mtype"], "mid": m["mid"], "name": nm}
+        if m["mtype"] == "agent":  # 已送达游标：给"✓ 谁收到了"回执用
+            d["delivered_id"] = get_cursor(("agent", m["mid"]), cid)["last_delivered_id"]
+        mems.append(d)
     im = any(m["mtype"] == viewer[0] and m["mid"] == viewer[1] for m in mems)
 
     if conv["type"] == "dm":

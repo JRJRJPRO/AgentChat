@@ -35,6 +35,7 @@ const S = {
   noteOpen: new Set(),// 已展开的观察层过程卡（note 消息 id）
   pendAtts: [],       // 待发送附件 [{kind,name,path,url,size}]
   auth: null,         // 登录失效信息（null = 正常）
+  receipts: {},       // 当前会话里 agent_id -> 已送达的消息 id（✓ 回执）
 };
 
 const $ = (id) => document.getElementById(id);
@@ -257,6 +258,7 @@ async function openConv(cid) {
   const d = await api(`/api/convs/${cid}`);
   S.cur = d.conv;
   S.spectate = !d.conv.is_member;
+  initReceipts(d.conv);
   S.msgs = [];
   S.msgIds = new Set();
   $("empty").classList.add("hidden");
@@ -469,9 +471,35 @@ function msgHtml(m) {
     `<div class="msg-body">` +
     (showName ? `<div class="msg-sender">${esc(m.sender)}</div>` : "") +
     `<div class="bubble">${mdlite(m.content)}${attsHtml(m.attachments)}</div>` +
-    `<div class="msg-time">${fmtTime(m.created_at)}</div>` +
-    `</div></div>`
+    `<div class="msg-time">${fmtTime(m.created_at)}` +
+    (mine ? `<span class="rcpt" data-rcpt="${m.id}">${esc(receiptText(m.id))}</span>` : "") +
+    `</div></div></div>`
   );
+}
+
+// ✓ 已送达回执：agent 的投递游标 >= 消息 id 就算收到（进了唤醒词/工具捎带）。
+// 私聊只画勾；群聊勾后跟名字，全都收到了就写"全员"
+function receiptText(mid) {
+  if (!S.cur) return "";
+  const agents = S.cur.members.filter((m) => m.mtype === "agent");
+  const got = agents.filter((m) => (S.receipts[m.mid] || 0) >= mid);
+  if (!got.length) return "";
+  if (S.cur.type === "dm" || agents.length === 1) return " ✓";
+  if (got.length === agents.length) return ` ✓ ${t("rcpt_all")}`;
+  return ` ✓ ${got.map((m) => m.name).join("、")}`;
+}
+
+function initReceipts(conv) {
+  S.receipts = {};
+  for (const m of conv.members) {
+    if (m.mtype === "agent") S.receipts[m.mid] = m.delivered_id || 0;
+  }
+}
+
+function updateReceipts() {
+  document.querySelectorAll("[data-rcpt]").forEach((el) => {
+    el.textContent = receiptText(+el.dataset.rcpt);
+  });
 }
 
 // 观察层 note：只用户可见、永久保留在时间线里，agent 不会收到。
@@ -729,6 +757,8 @@ async function refreshLists() {
       const d = await api(`/api/convs/${S.cur.id}`);
       S.cur = d.conv;
       S.spectate = !d.conv.is_member;
+      initReceipts(d.conv);
+      updateReceipts();
       renderChatHead();
       renderBanner();
       $("composer").classList.toggle("hidden", S.spectate);
@@ -790,8 +820,11 @@ function connectWS() {
         notify(0, "AgentChat", msg);
       }
     } else if (d.t === "usage_fail") {
-      S.usageMonitor = { ...(S.usageMonitor || {}), failing: d.failing };
-      if (d.failing) {
+      S.usageMonitor = { ...(S.usageMonitor || {}), failing: d.failing,
+        fail_reason: d.reason || null, retry_at: d.retry_at || 0 };
+      if (d.failing && d.reason === "rate_limited") {
+        toast(`⚠ ${usageFailText()}`);  // 限流是临时的，提示一下就好，不当大事
+      } else if (d.failing) {
         toast(`⚠ ${t("usage_fail_note")}`, 1);
         notify(0, "AgentChat", t("usage_fail_note"));
       }
@@ -815,6 +848,11 @@ function connectWS() {
     } else if (d.t === "perm_done") {
       const card = $("perm" + d.id);
       if (card) card.remove();
+    } else if (d.t === "receipt") {
+      if (S.cur && S.cur.id === d.conv_id) {
+        S.receipts[d.agent_id] = d.upto;
+        updateReceipts();
+      }
     } else if (d.t === "convs_changed") {
       refreshLists();
     } else if (d.t === "read") {
@@ -1292,7 +1330,16 @@ function renderUsageWarnSettings() {
   $("stPollSecV").textContent = fmtPollSec(+$("stPollSec").value);
   const fail = $("stUsageFail");
   fail.classList.toggle("hidden", !m.failing);
-  if (m.failing) fail.textContent = `⚠ ${t("usage_fail_note")}`;
+  if (m.failing) fail.textContent = `⚠ ${usageFailText()}`;
+}
+
+// 用量查询故障的说明文字：限流（临时，自动退避重试）与真失败（格式可能变了）分开讲
+function usageFailText() {
+  const m = S.usageMonitor || {};
+  if (m.fail_reason === "rate_limited") {
+    return t("usage_ratelimited").replace("{t}", m.retry_at ? fmtTime(m.retry_at) : "?");
+  }
+  return t("usage_fail_note");
 }
 
 async function saveUsageWarnSettings() {

@@ -717,11 +717,15 @@ function renderActs() {
   if (!S.cur) return;
   const box = $("msgs");
   const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 120;
+  let missing = false;
   for (const m of S.msgs) {
     if (m.stype !== "note" || m.kind !== "act" || m.content) continue;
     const el = document.querySelector(`.note-msg[data-mid="${m.id}"]`);
     if (el) el.outerHTML = noteHtml(m);
+    // 该渲染却不在 DOM：占位卡到达时比"working"广播早，当时被画成了空节点——补一次全量重绘
+    else if (noteHtml(m)) missing = true;
   }
+  if (missing) renderMsgs(false);
   if (nearBottom) box.scrollTop = box.scrollHeight;
 }
 

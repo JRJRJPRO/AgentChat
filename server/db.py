@@ -408,6 +408,12 @@ def mark_read(viewer, cid, msg_id):
     )
 
 
+def agent_replied_after(aid, cid, after_id):
+    """该 agent 在这个会话里、某条消息之后有没有发过言（"已读不回"检测用）。"""
+    return _row("SELECT 1 x FROM messages WHERE conv_id=? AND stype='agent' AND sid=? AND id>? LIMIT 1",
+                (cid, aid, after_id)) is not None
+
+
 def set_delivered(viewer, cid, msg_id):
     """绝对设置（唤醒失败时用来回退，重新派送）。"""
     _exec(

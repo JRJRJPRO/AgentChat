@@ -890,14 +890,17 @@ def _piggyback(agent):
 
     这就是"中途补充指令"的实现：不用打断进程、零额外唤醒成本，
     agent 下一次碰任何聊天工具就能看到你的新话。
-    返回 (捎带文本, [(conv_id, 送达到的消息id), ...])，后者给 ✓ 回执广播用。"""
+    返回 (捎带文本, [(conv_id, 送达前游标, 送达到的消息id), ...])，
+    给 ✓ 回执广播、过程卡换段和"已读不回"补救用。"""
     pend = db.agent_pending(agent)
     if not pend["batches"]:
         return "", []
     blocks, receipts = [], []
     for b in pend["batches"]:
-        db.set_delivered(("agent", agent["id"]), b["conv"]["id"], b["msgs"][-1]["id"])
-        receipts.append((b["conv"]["id"], b["msgs"][-1]["id"]))
+        cid = b["conv"]["id"]
+        prev = db.get_cursor(("agent", agent["id"]), cid)["last_delivered_id"]
+        db.set_delivered(("agent", agent["id"]), cid, b["msgs"][-1]["id"])
+        receipts.append((cid, prev, b["msgs"][-1]["id"]))
         blocks.append(prompts.batch_block(b["conv"], b["member_names"], b["msgs"]))
     return prompts.piggyback_block(blocks), receipts
 
@@ -915,9 +918,10 @@ async def internal_tool(payload: dict = Body(...)):
     try:
         result = await _tool_dispatch(agent, tool, payload.get("args") or {})
         pig, receipts = _piggyback(agent)
-        for cid, upto in receipts:
+        for cid, prev_cur, upto in receipts:
             await ws_manager.broadcast({"t": "receipt", "conv_id": cid,
                                         "agent_id": agent["id"], "upto": upto})
+            await hub.on_piggyback(agent["id"], cid, prev_cur, upto)
         extra = pig + await hub.usage_note(agent["id"])
         if extra:
             if not isinstance(result, str):

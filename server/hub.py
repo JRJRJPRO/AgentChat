@@ -324,6 +324,36 @@ class Hub:
         """✓ 已送达回执：该 agent 在这个会话里的投递游标动了（推进=收到，回退=收回）。"""
         await self.broadcast({"t": "receipt", "conv_id": cid, "agent_id": aid, "upto": upto})
 
+    async def _revert_pig(self, aid, already):
+        """唤醒失败/被打断时，把干活途中捎带送达的消息也回队（以前会悄悄丢掉）。
+        already 里已回退到更早游标的会话跳过，别用较新的捎带游标盖回去。"""
+        for cid, p in (self.running.get(aid, {}).get("pig") or {}).items():
+            if cid not in already:
+                db.set_delivered(("agent", aid), cid, p["prev"])
+                await self._receipt(aid, cid, p["prev"])
+
+    async def on_piggyback(self, aid, cid, prev_cur, upto):
+        """干活途中有消息捎带送达该会话时调用：
+        ①过程卡"换段"——旧段就地定格，新开一张占位卡排在新消息（和 ✓）下面，
+          之后的思考自然显示在新消息之后，时间线顺序不再错乱；
+        ②记下送达前的游标，收工时若"已读不回"则回退重派（见 _wake 成功分支）。"""
+        info = self.running.get(aid)
+        if not info:
+            return
+        info.setdefault("pig", {}).setdefault(cid, {"prev": prev_cur, "since": upto})
+        items = self.activity.get(aid) or []
+        notes = info.setdefault("notes", {})
+        n = notes.get(cid)
+        if n is not None:  # 旧段定格
+            seg = items[n["start"]:]
+            m = db.update_message(n["mid"], json.dumps(seg, ensure_ascii=False) if seg else "")
+            await self.broadcast({"t": "msg_update", "conv_id": cid, "message": m})
+        m2 = db.post_message(cid, "note", aid, "", kind="act")
+        notes[cid] = {"mid": m2["id"], "start": len(items)}
+        if cid not in (info.get("convs") or []):
+            info.setdefault("convs", []).append(cid)  # 用量提醒留痕等也认这个会话了
+        await self.broadcast({"t": "msg", "conv_id": cid, "message": m2})
+
     async def chain_clear(self, cid):
         if cid in self.chain_notified:
             self.chain_notified.discard(cid)
@@ -549,14 +579,21 @@ class Hub:
             await self._receipt(aid, cid, b["msgs"][-1]["id"])  # ✓ 回执：消息进了唤醒词
         pend["prev_cursors"] = prev
 
+        # 先广播"工作中"再插占位卡——顺序反了的话，直播卡到达前端时 S.working
+        # 还没有这个 agent，会被渲染成空节点，之后怎么刷都找不回来（切走再切回才出现）
+        self.activity[aid] = []
+        await self.broadcast({"t": "agent", "id": aid, "run": "working"})
+
         # 观察层：在每个触发本次唤醒的会话里插一条 note 占位（💭 过程卡）。
-        # 只给用户看的时间线记录，唤醒结束时把思考/工具动态定格进去；agent 永远收不到。
+        # 只给用户看的时间线记录；干活途中有消息捎带送达时会"换段"（on_piggyback），
+        # 让送达之后的思考排在新消息（和它的 ✓）下面；收工时各段分别定格。
         notes = {}
         for cid in prev:
             m = db.post_message(cid, "note", aid, "", kind="act")
-            notes[cid] = m["id"]
+            notes[cid] = {"mid": m["id"], "start": 0}
             await self.broadcast({"t": "msg", "conv_id": cid, "message": m})
         self.running[aid]["convs"] = list(prev.keys())
+        self.running[aid]["notes"] = notes
 
         first = not agent["bootstrapped"]
         blocks = [prompts.batch_block(b["conv"], b["member_names"], b["msgs"]) for b in pend["batches"]]
@@ -594,10 +631,7 @@ class Hub:
         log_path = os.path.join(config.LOG_DIR, f"agent{aid}_{int(time.time())}.log")
         env = self._agent_env()
 
-        await self.broadcast({"t": "agent", "id": aid, "run": "working"})
-
         started = time.time()
-        self.activity[aid] = []
         result_evt = {}
         with open(log_path, "w", encoding="utf-8", errors="replace") as f:
             f.write(f"# cmd: {cmd}\n# ---- prompt ----\n{prompt}\n# ---- output ----\n")
@@ -639,11 +673,11 @@ class Hub:
                 rc = -1
                 f.write("\n# !! 超时被杀\n")
 
-        # 观察层：把本次唤醒的过程动态定格进占位 note（空动态就留空，前端不显示）
+        # 观察层：把过程动态按段定格进各占位 note（换过段的只装自己那段；空段留空，前端不显示）
         items = self.activity.get(aid) or []
-        content = json.dumps(items, ensure_ascii=False) if items else ""
-        for cid, mid in notes.items():
-            m = db.update_message(mid, content)
+        for cid, n in (self.running.get(aid, {}).get("notes") or notes).items():
+            seg = items[n["start"]:]
+            m = db.update_message(n["mid"], json.dumps(seg, ensure_ascii=False) if seg else "")
             await self.broadcast({"t": "msg_update", "conv_id": cid, "message": m})
 
         db.record_wake(aid)
@@ -672,6 +706,7 @@ class Hub:
             for cid, cur in prev.items():
                 db.set_delivered(("agent", aid), cid, cur)  # 消息回队，恢复后重发
                 await self._receipt(aid, cid, cur)  # 回执收回：其实没送进去
+            await self._revert_pig(aid, prev)
             if first and rc != 0:
                 db.update_agent(aid, session_id=str(uuid.uuid4()))
             self.auth_needed = {"kind": "auth" if auth_err else "limit",
@@ -691,6 +726,12 @@ class Hub:
                 await self.broadcast({"t": "auth", "needed": False})
             if first:
                 db.update_agent(aid, bootstrapped=1)
+            # 已读不回补救：干活途中捎带送达的消息，到收工都没在那个会话里回过一句
+            # → 游标回退重新派送（下一轮是正常唤醒批而非捎带，不会无限循环）
+            for cid, p in (self.running.get(aid, {}).get("pig") or {}).items():
+                if not db.agent_replied_after(aid, cid, p["since"]):
+                    db.set_delivered(("agent", aid), cid, p["prev"])
+                    await self._receipt(aid, cid, p["prev"])
         elif stopped:
             # 用户硬停止：不算失败，也不重发（避免死循环）
             if first:
@@ -700,6 +741,7 @@ class Hub:
             for cid, cur in prev.items():
                 db.set_delivered(("agent", aid), cid, cur)
                 await self._receipt(aid, cid, cur)
+            await self._revert_pig(aid, prev)
             self.interrupted.add(aid)
             self.fails[aid] = 0
             if first:
@@ -716,6 +758,7 @@ class Hub:
             for cid, cur in (pend.get("prev_cursors") or {}).items():
                 db.set_delivered(("agent", aid), cid, cur)
                 await self._receipt(aid, cid, cur)
+            await self._revert_pig(aid, pend.get("prev_cursors") or {})
         if self.auth_needed:
             return  # 全局挂起期间的失败不是 agent 的锅（多半是撞上 429），不计数不暂停，恢复后重发
         self.fails[aid] = self.fails.get(aid, 0) + 1

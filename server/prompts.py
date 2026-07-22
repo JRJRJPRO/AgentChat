@@ -75,5 +75,7 @@ def wake_prompt(agent: dict, blocks: list, first_time: bool, interrupted: bool =
 
 def piggyback_block(blocks: list) -> str:
     """agent 干活期间到达的新消息，搭工具调用返回值的便车送达（零额外唤醒成本）。"""
-    return ("\n\n【你工作期间收到了新消息，处理完当前步骤后请一并考虑】\n"
+    return ("\n\n【你工作期间收到了新消息，处理完当前步骤后请一并考虑；"
+            "需要回应的务必在收工前用 send_message 回一句（哪怕先简短说明状态），"
+            "别只顾手头任务让对方已读不回干等】\n"
             + "\n\n".join(blocks))

@@ -534,6 +534,12 @@ class Hub:
             if not self.claude:
                 raise RuntimeError("PATH 里找不到 claude CLI")
 
+        # 记忆自动挂载：agent 上轮自建的 memory/<包>/ 这轮就进 CLAUDE.md 导入块
+        try:
+            await asyncio.to_thread(memories.auto_mount, agent)
+        except OSError:
+            pass  # 挂载失败不挡唤醒
+
         # 推进派送游标（失败时回退）
         prev = {}
         for b in pend["batches"]:

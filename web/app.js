@@ -1141,7 +1141,15 @@ async function loadLibrary() {
 
 function libPackInfo() {
   if (!S.lib || !S.library) return null;
+  if (S.lib.kind.startsWith("agent:")) {
+    const g = libAgentGroup(S.lib.kind);
+    return g ? g.packs.find((p) => p.name === S.lib.pack) || null : null;
+  }
   return (S.library[S.lib.kind] || []).find((p) => p.name === S.lib.pack) || null;
+}
+
+function libAgentGroup(kind) {
+  return (S.library.agent_mems || []).find((g) => `agent:${g.agent_id}` === kind) || null;
 }
 
 function libConfirmDiscard() {
@@ -1178,6 +1186,21 @@ function renderLibraryList() {
       root.appendChild(item);
     }
   }
+  // 各 agent 的工作记忆（工作目录 memory/ 实况，含它们自建的包）——记忆的事实源
+  for (const g of (S.library.agent_mems || [])) {
+    const kind = `agent:${g.agent_id}`;
+    root.insertAdjacentHTML("beforeend",
+      `<div class="lib-sect"><span>🧠 ${esc(t("lib_agent_mem").replace("{n}", g.agent_name))}</span></div>`);
+    for (const p of g.packs) {
+      const item = document.createElement("div");
+      item.className = "lib-item" + (S.lib && S.lib.kind === kind && S.lib.pack === p.name ? " active" : "");
+      item.innerHTML = `<div class="lib-name">${esc(p.name)}</div>` +
+        (p.description ? `<div class="lib-desc">${esc(p.description)}</div>` : "") +
+        `<div class="lib-used">${p.files.length}${esc(t("files_n"))}</div>`;
+      item.onclick = () => openLibPack(kind, p.name);
+      root.appendChild(item);
+    }
+  }
 }
 
 async function openLibPack(kind, pack) {
@@ -1193,7 +1216,7 @@ async function openLibPack(kind, pack) {
   renderLibraryList();
   renderLibView();
   const info = libPackInfo();
-  const def = kind === "memories" ? "MEMORY.md" : "SKILL.md";
+  const def = kind === "skills" ? "SKILL.md" : "MEMORY.md";
   const file = info && info.files.length ? (info.files.includes(def) ? def : info.files[0]) : null;
   if (file) openLibFile(file, true);
 }
@@ -1201,9 +1224,11 @@ async function openLibPack(kind, pack) {
 function renderLibView() {
   const info = libPackInfo();
   $("libTitle").textContent = S.lib ? S.lib.pack : "";
-  $("libSub").textContent = !info ? "" :
-    t(S.lib.kind === "memories" ? "lib_memories" : "lib_skills") + " · " +
-    (info.used_by && info.used_by.length ? t("used_by") + info.used_by.join("、") : t("unused"));
+  const g = S.lib && S.lib.kind.startsWith("agent:") ? libAgentGroup(S.lib.kind) : null;
+  $("libSub").textContent = !info ? "" : g
+    ? t("lib_agent_mem").replace("{n}", g.agent_name)
+    : t(S.lib.kind === "memories" ? "lib_memories" : "lib_skills") + " · " +
+      (info.used_by && info.used_by.length ? t("used_by") + info.used_by.join("、") : t("unused"));
   const box = $("libFiles");
   box.innerHTML = "";
   for (const f of (info ? info.files : [])) {
@@ -1225,6 +1250,7 @@ function renderLibView() {
   }
   const sp = $("libSplit");
   sp.classList.toggle("hidden", !(S.lib && S.lib.kind === "memories"));
+  $("libPromote").classList.toggle("hidden", !(S.lib && S.lib.kind.startsWith("agent:")));
   sp.textContent = !S.libSplit ? t("split_pack")
     : (S.libSplit.size ? t("split_out").replace("{n}", S.libSplit.size) : t("split_cancel"));
   if (S.libSplit) $("libStatus").textContent = t("split_hint");
@@ -1259,6 +1285,19 @@ async function libSplitClick() {
     await loadLibrary();
     openLibPack("memories", name);
     toast(t("split_done"));
+  } catch (e) { toast(e.message, 1); }
+}
+
+async function libPromoteClick() {
+  if (!S.lib || !S.lib.kind.startsWith("agent:")) return;
+  if (!confirm(t("promote_confirm").replace("{n}", S.lib.pack))) return;
+  try {
+    await api("/api/library/promote", { kind: S.lib.kind, pack: S.lib.pack });
+    S.memsInfo = null;  // 勾选列表缓存失效（中央库多了一个包）
+    await loadLibrary();
+    renderLibraryList();
+    renderLibView();
+    toast(t("promote_done"));
   } catch (e) { toast(e.message, 1); }
 }
 
@@ -1609,6 +1648,7 @@ function bind() {
   $("libSave").onclick = saveLibFile;
   $("libNewFile").onclick = newLibFile;
   $("libSplit").onclick = libSplitClick;
+  $("libPromote").onclick = libPromoteClick;
   $("libEditor").addEventListener("input", () => {
     S.libDirty = true;
     $("libStatus").textContent = t("unsaved");

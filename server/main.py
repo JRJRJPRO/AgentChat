@@ -283,7 +283,16 @@ def _lib_root(kind):
         return config.MEMORIES_DIR
     if kind == "skills":
         return config.SKILLS_DIR
-    err("kind 只能是 memories 或 skills")
+    if isinstance(kind, str) and kind.startswith("agent:"):
+        # agent 的工作记忆：<工作目录>/memory——它自建/自改的包在资源库里可看可编辑
+        try:
+            a = db.get_agent(int(kind.split(":", 1)[1]))
+        except ValueError:
+            a = None
+        if not a:
+            err("agent 不存在", 404)
+        return os.path.join(a["cwd"], "memory")
+    err("kind 只能是 memories / skills / agent:<id>")
 
 
 _ILLEGAL_CHARS = set('/:*?"<>|' + chr(92))
@@ -313,7 +322,13 @@ async def api_library():
         m["used_by"] = [a["name"] for a in agents if m["name"] in (a.get("memories") or "").split(",")]
     for s in sks:
         s["used_by"] = [a["name"] for a in agents if s["name"] in (a.get("skills") or "").split(",")]
-    return {"memories": mems, "skills": sks,
+    # 各在岗 agent 工作目录里的实际记忆包（含它们自建的）——记忆的事实源
+    agent_mems = []
+    for a in agents:
+        packs = memories.list_workspace(a)
+        if packs:
+            agent_mems.append({"agent_id": a["id"], "agent_name": a["name"], "packs": packs})
+    return {"memories": mems, "skills": sks, "agent_mems": agent_mems,
             "memories_dir": config.MEMORIES_DIR, "skills_dir": config.SKILLS_DIR}
 
 
@@ -351,9 +366,35 @@ description: 一句话描述这个技能
 """
 
 
+@app.post("/api/library/promote")
+async def api_library_promote(payload: dict = Body(...)):
+    """把某 agent 工作目录里的记忆包"收编"进中央记忆库（复制一份，可再分发给其他 agent）。
+    原 agent 继续用自己的工作副本；顺手把包名记进它的勾选，防止 auto_mount
+    因"名字已入中央库但没勾选"而把它卸载。"""
+    kind = payload.get("kind") or ""
+    pack = (payload.get("pack") or "").strip()
+    if not kind.startswith("agent:"):
+        err("只能收编 agent 的工作记忆")
+    src = _lib_path(kind, pack)
+    dst = _lib_path("memories", pack)
+    if not os.path.isfile(os.path.join(src, "MEMORY.md")):
+        err("包不存在", 404)
+    if os.path.exists(dst):
+        err("中央记忆库已存在同名包")
+    import shutil
+    shutil.copytree(src, dst)
+    a = db.get_agent(int(kind.split(":", 1)[1]))
+    mems = [n for n in (a.get("memories") or "").split(",") if n]
+    if pack not in mems:
+        db.update_agent(a["id"], memories=",".join(mems + [pack]))
+    return {"ok": True}
+
+
 @app.post("/api/library/new_pack")
 async def api_library_new_pack(payload: dict = Body(...)):
     kind = payload.get("kind")
+    if kind not in ("memories", "skills"):
+        err("新建包只支持中央库（agent 的工作记忆由它自己在工作目录里建）")
     path = _lib_path(kind, (payload.get("name") or "").strip())
     if os.path.exists(path):
         err("已存在同名包")

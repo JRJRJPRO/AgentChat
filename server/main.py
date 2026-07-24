@@ -882,6 +882,33 @@ async def _tool_dispatch(agent, tool, args):
             out.append({"name": a["name"], "status": a["status"], "memo": a["memo"]})
         return out or "系统里暂时没有其他 agent。"
 
+    if tool == "set_reminder":
+        # 跨挂起的闹钟：会话内轮询活不过收工，由服务器保管、到点发消息唤醒
+        try:
+            minutes = float(args.get("minutes"))
+        except (TypeError, ValueError):
+            raise ToolError("minutes 要是数字（分钟）")
+        minutes = max(1.0, min(minutes, 7 * 24 * 60))
+        note = (args.get("note") or "").strip()[:500]
+        if not note:
+            raise ToolError("note 必填：到点收到的消息里只有它能告诉你该干什么")
+        cmd = (args.get("check_command") or "").strip()[:1000]
+        due = time.time() + minutes * 60
+        recheck = int(max(60, min(minutes * 60, 1800)))  # 没好就隔 1-30 分钟重查
+        rid = db.add_reminder(agent["id"], due, note, cmd, recheck, time.time() + 7 * 24 * 3600)
+        # 观察层 ⏰ 留痕：老板能看到谁挂了什么提醒
+        dm = db.ensure_dm(db.USER, ("agent", agent["id"]))
+        txt = (f"「{agent['name']}」设了提醒：{minutes:g} 分钟后"
+               + (f"，先跑检查命令通过才唤醒（{cmd[:120]}）" if cmd else "")
+               + f" —— {note}")
+        m = db.post_message(dm["id"], "note", agent["id"], txt, kind="remind")
+        await ws_manager.broadcast({"t": "msg", "conv_id": dm["id"], "message": m})
+        due_str = time.strftime("%m-%d %H:%M", time.localtime(due))
+        return (f"提醒已由服务器登记（id={rid}），{due_str} 到点"
+                + ("；届时先跑你的检查命令，退出码 0 才唤醒你，否则自动顺延重查（最长 7 天后强制唤醒）。"
+                   if cmd else "，届时系统消息会唤醒你。")
+                + "现在可以放心收工结束本轮。")
+
     raise ToolError(f"未知工具: {tool}")
 
 

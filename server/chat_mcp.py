@@ -104,6 +104,26 @@ TOOLS = [
         },
     },
     {
+        "name": "set_reminder",
+        "description": (
+            "设一个跨挂起的定时提醒（服务器保管的闹钟）。你每轮收工后进程就退出，"
+            "会话里的一切轮询、后台任务完成通知、sleep 都会随之失效——凡是「等某事完成后继续」"
+            "一律用本工具，设完就放心收工。到点后系统会用一条消息唤醒你（服务器重启也不丢）。"
+            "可选 check_command：到点时服务器先在你的工作目录零成本跑这条命令，"
+            "退出码 0 才唤醒你，非 0 则每隔一小会儿自动重查——适合「实验/长任务跑完叫我」，"
+            "让命令去检查结果文件或进程状态。"
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "minutes": {"type": "number", "description": "多少分钟后到点（1 到 10080，即最长 7 天）"},
+                "note": {"type": "string", "description": "提醒内容备注：到点收到的消息里会原样带上，写清楚该干什么"},
+                "check_command": {"type": "string", "description": "可选。到点时先跑的检查命令（shell，工作目录=你的工作目录）；退出码 0=条件满足才唤醒，非 0=没好，稍后自动重查"},
+            },
+            "required": ["minutes", "note"],
+        },
+    },
+    {
         # 系统内部用：开了"越权询问"的 agent，CLI 遇到权限不足的操作时
         # 会自动调这个工具（--permission-prompt-tool），阻塞等用户点允许/拒绝。
         # agent 自己不要主动调它。

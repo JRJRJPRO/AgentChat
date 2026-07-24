@@ -505,9 +505,10 @@ function updateReceipts() {
 // 观察层 note：只用户可见、永久保留在时间线里，agent 不会收到。
 // kind=usage → ⚠ 系统提醒留痕；kind=act → 💭 过程卡（跑时实时滚动，跑完定格；>2 行折叠）
 function noteHtml(m) {
-  if (m.kind !== "act") {  // usage=⚠系统提醒留痕，compact=🧹压缩记录
+  if (m.kind !== "act") {  // usage=⚠系统提醒留痕，compact=🧹压缩记录，remind=⏰定时提醒
+    const icon = { compact: "🧹", remind: "⏰" }[m.kind] || "⚠";
     return `<div class="note-msg" data-mid="${m.id}"><div class="note-card usage">` +
-      `${m.kind === "compact" ? "🧹" : "⚠"} ${esc(m.content)}<span class="note-time">${fmtTime(m.created_at)}</span></div></div>`;
+      `${icon} ${esc(m.content)}<span class="note-time">${fmtTime(m.created_at)}</span></div></div>`;
   }
   let items = [];
   try { items = m.content ? JSON.parse(m.content) : []; } catch (e) { /* 老格式忽略 */ }

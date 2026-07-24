@@ -59,7 +59,7 @@ DEFAULT_PERMISSION = "worker"
 CHAT_TOOLS = [
     "send_message", "list_conversations", "read_messages", "open_dm",
     "create_group", "add_member", "leave_conversation", "list_agents",
-    "ask_user",
+    "ask_user", "set_reminder",
 ]
 ALLOWED_CHAT_TOOLS = [f"mcp__chat__{t}" for t in CHAT_TOOLS]
 

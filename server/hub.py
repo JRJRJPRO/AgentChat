@@ -39,6 +39,8 @@ class Hub:
         self.usage_alert = None  # Session(5h) 用量过阈值时 {"pct","resets_at","threshold"}
         self.usage_note_sent = set()  # 本轮预警期内已捎过收尾提醒的 agent_id
         self.usage_failing = False    # 用量接口连续查询失败（格式变了/网络断了），要让用户知道
+        self._rem_busy = set()   # 正在处理（跑检查命令）的提醒 id，防重复触发
+        self._rem_last = 0.0     # 上次扫描提醒的时刻（节流）
         self.claude = shutil.which("claude")
         self.git_bash = self._find_git_bash()  # Windows 上 claude 需要 git-bash
 
@@ -320,6 +322,59 @@ class Hub:
         except (ProcessLookupError, subprocess.TimeoutExpired, OSError):
             pass
 
+    async def _check_reminders(self):
+        """扫到点的 ⏰ 提醒（约 20 秒一次）。逐条起任务处理，检查命令不挡唤醒扫描。"""
+        if time.time() - self._rem_last < 20:
+            return
+        self._rem_last = time.time()
+        try:
+            due = db.due_reminders(time.time())
+        except Exception:
+            return
+        for r in due:
+            if r["id"] not in self._rem_busy:
+                self._rem_busy.add(r["id"])
+                asyncio.create_task(self._fire_reminder(r))
+
+    async def _fire_reminder(self, r):
+        """到点的提醒：有检查命令先零 token 跑一下，成功才唤醒；没好就顺延重查。"""
+        rid, aid = r["id"], r["agent_id"]
+        try:
+            agent = db.get_agent(aid)
+            if not agent or agent["status"] == "archived":
+                db.finish_reminder(rid)
+                return
+            tail = ""
+            if r["check_cmd"]:
+                out = await asyncio.to_thread(self._run_check, r["check_cmd"], agent["cwd"])
+                if out is None:  # 条件还没满足
+                    if time.time() < (r["expire_at"] or 0):
+                        db.bump_reminder(rid, time.time() + max(60, r["recheck_secs"]))
+                        return
+                    tail = "\n（检查命令连续多日未成功，按超时唤醒你处理）"
+                elif out:
+                    tail = f"\n检查命令输出（尾部）：{out}"
+            db.finish_reminder(rid)
+            dm = db.ensure_dm(db.USER, ("agent", aid))
+            m = db.post_message(dm["id"], "system", 0,
+                                f"⏰ 你设的提醒到点了：{r['note']}{tail}", kind="remind")
+            await self.broadcast({"t": "msg", "conv_id": dm["id"], "message": m})
+            self.poke()
+        finally:
+            self._rem_busy.discard(rid)
+
+    @staticmethod
+    def _run_check(cmd, cwd):
+        """跑提醒的检查命令：退出码 0 → 返回输出尾部（可能为空串），非 0/异常 → None。"""
+        try:
+            p = subprocess.run(cmd, shell=True, cwd=cwd or None,
+                               capture_output=True, timeout=120)
+            if p.returncode != 0:
+                return None
+            return (p.stdout or b"").decode("utf-8", "replace").strip()[-400:]
+        except Exception:
+            return None
+
     async def _receipt(self, aid, cid, upto):
         """✓ 已送达回执：该 agent 在这个会话里的投递游标动了（推进=收到，回退=收回）。"""
         await self.broadcast({"t": "receipt", "conv_id": cid, "agent_id": aid, "upto": upto})
@@ -522,6 +577,7 @@ class Hub:
             if self.event.is_set():
                 self.event.clear()
                 await asyncio.sleep(config.WAKE_DEBOUNCE)  # 攒一批
+            await self._check_reminders()  # ⏰ 到点的提醒（发消息不受挂起影响，唤醒会排队）
             if self.auth_needed:
                 continue  # 登录失效期间不唤醒（消息留在队列里，重新登录后一次补送）
             for agent in db.list_agents():

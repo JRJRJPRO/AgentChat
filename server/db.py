@@ -82,6 +82,17 @@ CREATE TABLE IF NOT EXISTS wakes(
   log_path TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_wakes_time ON wakes(started);
+CREATE TABLE IF NOT EXISTS reminders(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  agent_id INTEGER NOT NULL,
+  due_at REAL NOT NULL,          -- 下次到点/重查时刻
+  note TEXT NOT NULL DEFAULT '',
+  check_cmd TEXT NOT NULL DEFAULT '',   -- 可选：到点先零 token 跑它，退出码 0 才唤醒
+  recheck_secs INTEGER NOT NULL DEFAULT 300,
+  expire_at REAL NOT NULL DEFAULT 0,    -- 检查命令一直不成功的放弃时限（届时按超时唤醒）
+  created_at REAL NOT NULL,
+  done INTEGER NOT NULL DEFAULT 0
+);
 """
 
 USER = ("user", 0)
@@ -408,6 +419,27 @@ def mark_read(viewer, cid, msg_id):
     )
 
 
+# ---------------- 提醒（跨挂起的闹钟：会话内轮询活不过收工，闹钟由服务器保管） ----------------
+
+def add_reminder(aid, due_at, note, check_cmd, recheck_secs, expire_at):
+    return _exec(
+        "INSERT INTO reminders(agent_id,due_at,note,check_cmd,recheck_secs,expire_at,created_at,done)"
+        " VALUES(?,?,?,?,?,?,?,0)",
+        (aid, due_at, note, check_cmd, recheck_secs, expire_at, time.time()))
+
+
+def due_reminders(now):
+    return _rows("SELECT * FROM reminders WHERE done=0 AND due_at<=?", (now,))
+
+
+def bump_reminder(rid, due_at):
+    _exec("UPDATE reminders SET due_at=? WHERE id=?", (due_at, rid))
+
+
+def finish_reminder(rid):
+    _exec("UPDATE reminders SET done=1 WHERE id=?", (rid,))
+
+
 def agent_replied_after(aid, cid, after_id):
     """该 agent 在这个会话里、某条消息之后有没有发过言（"已读不回"检测用）。"""
     return _row("SELECT 1 x FROM messages WHERE conv_id=? AND stype='agent' AND sid=? AND id>? LIMIT 1",
@@ -523,7 +555,8 @@ def agent_pending(agent):
         )
         if not msgs:
             continue
-        if not any(m["stype"] in ("user", "agent") for m in msgs):
+        # 值得唤醒的：人/agent 的消息，或 ⏰ 到点提醒（普通系统消息不值得单独唤醒）
+        if not any(m["stype"] in ("user", "agent") or m["kind"] == "remind" for m in msgs):
             continue
         if chain_state(c)["paused"]:
             res["paused"].append(c["id"])

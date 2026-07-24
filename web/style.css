@@ -103,6 +103,7 @@ body {
 .dot.working { background: var(--yellow); animation: pulse 1.2s infinite; }
 .dot.online { background: var(--green); }
 .dot.paused { background: var(--muted); }
+.dot.waiting { background: var(--yellow); }  /* ⏳ 在等后台任务/长 sleep（进程活着） */
 @keyframes pulse { 50% { opacity: .4; } }
 
 .conv-mid { flex: 1; min-width: 0; }

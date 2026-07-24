@@ -28,6 +28,7 @@ const S = {
   working: new Set(), // 正在运行的 agent id
   compacting: new Set(), // 正在压缩上下文的 agent id（可多个同时压）
   probing: new Set(),  // 正在查上下文构成（/context 探测，约 3-5 秒）的 agent id
+  waiting: new Set(),  // ⏳ 用 Claude 自带方式等后台任务/长 sleep 的 agent id（进程活着但在等）
   defaults: {},
   models: [],
   permissions: [],
@@ -125,6 +126,7 @@ function avatarHtml(name, isUser, extraCls, dotCls) {
 function agentById(id) { return S.agents.find((a) => a.id === id); }
 function agentDot(a) {
   if (!a) return "";
+  if (S.waiting.has(a.id)) return "waiting";
   if (S.working.has(a.id) || S.compacting.has(a.id) || S.probing.has(a.id) || a.run === "working") return "working";
   if (a.status === "active") return "online";
   return "paused";
@@ -197,10 +199,11 @@ function renderAgentList() {
   for (const a of ordered) {
     const card = document.createElement("div");
     card.className = "agent-card" + (a.status === "archived" ? " archived" : "");
-    const running = S.working.has(a.id);
+    const running = S.working.has(a.id) || S.waiting.has(a.id);
     const stText = S.compacting.has(a.id) ? t("compacting")
       : S.probing.has(a.id) ? t("probing")
-      : running ? t("working") : t(a.status === "active" ? "online" : a.status);
+      : S.waiting.has(a.id) ? `⏳ ${t("waiting")}`
+      : S.working.has(a.id) ? t("working") : t(a.status === "active" ? "online" : a.status);
     const av = a.status === "archived"
       ? avatarHtml(a.name, false, "round archived", "")
       : avatarHtml(a.name, false, "round", agentDot(a));
@@ -277,7 +280,7 @@ async function openConv(cid) {
   renderTyping();
   // 有成员正在干活的话，补拉它本轮的过程动态（刷新页面/中途进来也能看到）
   for (const m of d.conv.members) {
-    if (m.mtype === "agent" && S.working.has(m.mid)) fetchActs(m.mid);
+    if (m.mtype === "agent" && (S.working.has(m.mid) || S.waiting.has(m.mid))) fetchActs(m.mid);
   }
   autoProbe(d.conv);  // 私聊对方没有上下文数字时，悄悄量一次
   $("composer").classList.toggle("hidden", S.spectate);
@@ -427,7 +430,7 @@ async function ctxReportCurrent() {
 function autoProbe(c) {
   const a = dmAgent(c);
   if (!a || a.status !== "active" || !a.wake_count || a.ctx_tokens > 0) return;
-  if (S.working.has(a.id) || S.compacting.has(a.id) || S.probing.has(a.id)) return;
+  if (S.working.has(a.id) || S.compacting.has(a.id) || S.probing.has(a.id) || S.waiting.has(a.id)) return;
   api(`/api/agents/${a.id}/context`, {}).catch(() => {});  // 结果走 ws ctx 广播
 }
 
@@ -512,7 +515,7 @@ function noteHtml(m) {
   }
   let items = [];
   try { items = m.content ? JSON.parse(m.content) : []; } catch (e) { /* 老格式忽略 */ }
-  const live = !m.content && S.working.has(m.sid);
+  const live = !m.content && (S.working.has(m.sid) || S.waiting.has(m.sid));
   if (live) items = S.acts[m.sid] || [];
   if (!items.length && !live) return "";  // 跑完了也没过程可讲：不占地方
   const open = S.noteOpen.has(m.id);
@@ -682,11 +685,20 @@ function renderTyping() {
   const el = $("typing");
   if (!S.cur) return el.classList.add("hidden");
   const workers = S.cur.members.filter((m) => m.mtype === "agent" && S.working.has(m.mid));
-  if (workers.length) {
-    el.innerHTML = `${esc(workers.map((m) => m.name).join("、"))} ${esc(t("typing"))} ` +
-      workers.map((m) =>
-        `<button class="mini-btn warn" data-int="${m.mid}" title="${esc(t("interrupt_hint"))}">⏹ ${esc(t("interrupt"))} ${esc(m.name)}</button>`
-      ).join(" ");
+  const waiters = S.cur.members.filter((m) => m.mtype === "agent" && S.waiting.has(m.mid));
+  if (workers.length || waiters.length) {
+    const intBtn = (m) =>
+      `<button class="mini-btn warn" data-int="${m.mid}" title="${esc(t("interrupt_hint"))}">⏹ ${esc(t("interrupt"))} ${esc(m.name)}</button>`;
+    let html = "";
+    if (workers.length) {
+      html += `${esc(workers.map((m) => m.name).join("、"))} ${esc(t("typing"))} ` +
+        workers.map(intBtn).join(" ");
+    }
+    if (waiters.length) {
+      html += `${workers.length ? "　" : ""}⏳ ${esc(waiters.map((m) => m.name).join("、"))} ${esc(t("waiting_hint"))} ` +
+        waiters.map(intBtn).join(" ");
+    }
+    el.innerHTML = html;
     el.querySelectorAll("[data-int]").forEach((b) => (b.onclick = () => interruptAgent(+b.dataset.int)));
     el.classList.remove("hidden");
   } else {
@@ -746,6 +758,7 @@ async function refreshLists() {
   S.working = new Set(st.agents.filter((a) => a.run === "working").map((a) => a.id));
   S.compacting = new Set(st.agents.filter((a) => a.run === "compacting").map((a) => a.id));
   S.probing = new Set(st.agents.filter((a) => a.run === "probing").map((a) => a.id));
+  S.waiting = new Set(st.agents.filter((a) => a.run === "waiting").map((a) => a.id));
   S.models = st.models;
   S.permissions = st.permissions;
   S.defaults = st.defaults;
@@ -790,8 +803,11 @@ function connectWS() {
         if (el) el.outerHTML = msgHtml(d.message);
       }
     } else if (d.t === "agent") {
-      S.working.delete(d.id); S.compacting.delete(d.id); S.probing.delete(d.id);
-      if (d.run === "working") { S.working.add(d.id); S.acts[d.id] = []; }
+      // working ⇄ waiting 是同一轮运行的两种面貌，翻转时不能清空过程动态
+      const wasBusy = S.working.has(d.id) || S.waiting.has(d.id);
+      S.working.delete(d.id); S.compacting.delete(d.id); S.probing.delete(d.id); S.waiting.delete(d.id);
+      if (d.run === "working") { S.working.add(d.id); if (!wasBusy) S.acts[d.id] = []; }
+      else if (d.run === "waiting") S.waiting.add(d.id);
       else if (d.run === "compacting") S.compacting.add(d.id);
       else if (d.run === "probing") S.probing.add(d.id);
       const a = agentById(d.id);

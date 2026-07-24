@@ -72,7 +72,16 @@ class Hub:
             return "idle"
         if info.get("compact"):
             return "compacting"
-        return "probing" if info.get("probe") else "working"
+        if info.get("probe"):
+            return "probing"
+        return "waiting" if self._is_waiting(info) else "working"
+
+    @staticmethod
+    def _is_waiting(info):
+        """"等待中"：一个工具调用挂起超过 2 分钟没回来——多半是长 sleep、
+        等实验/后台任务（Claude 自带的等待方式，John 拍板允许并单独显示）。"""
+        ts = info.get("tool_pending_ts")
+        return bool(ts) and time.time() - ts > 120
 
     async def stop_agent(self, aid):
         """硬停止：杀进程树，这批消息不再重发。"""
@@ -305,6 +314,21 @@ class Hub:
                                 ctx_at=wakes[0][0] if wakes else 0)
             elif last_comp and (not wakes or last_comp > wakes[0][0]):
                 db.update_agent(aid, ctx_tokens=-1, ctx_at=last_comp)  # 压缩后还没醒过
+
+    async def _wake_watchdog(self, aid, proc, started):
+        """活性看门：连续 WAKE_TIMEOUT 没有任何输出事件才算卡死（等待中——有挂起的
+        工具调用，比如一条长 sleep——放宽一倍）；绝对上限 24h 防彻底失控。"""
+        while proc.returncode is None:
+            await asyncio.sleep(30)
+            info = self.running.get(aid)
+            if not info or info.get("proc") is not proc:
+                return
+            idle = time.time() - (info.get("last_evt") or started)
+            allow = config.WAKE_TIMEOUT * (2 if info.get("tool_pending_ts") else 1)
+            if idle > allow or time.time() - started > 24 * 3600:
+                info["timed_out"] = True
+                self._kill_tree(proc)
+                return
 
     @staticmethod
     def _kill_tree(proc):
@@ -578,6 +602,14 @@ class Hub:
                 self.event.clear()
                 await asyncio.sleep(config.WAKE_DEBOUNCE)  # 攒一批
             await self._check_reminders()  # ⏰ 到点的提醒（发消息不受挂起影响，唤醒会排队）
+            # 工作中 ⇄ 等待中 的状态翻转推给界面（主循环最迟 5s 一拍，够顺滑）
+            for aid2, info in list(self.running.items()):
+                if info.get("compact") or info.get("probe") or not info.get("proc"):
+                    continue
+                st = "waiting" if self._is_waiting(info) else "working"
+                if info.get("shown") != st:
+                    info["shown"] = st
+                    await self.broadcast({"t": "agent", "id": aid2, "run": st})
             if self.auth_needed:
                 continue  # 登录失效期间不唤醒（消息留在队列里，重新登录后一次补送）
             for agent in db.list_agents():
@@ -638,6 +670,8 @@ class Hub:
         # 先广播"工作中"再插占位卡——顺序反了的话，直播卡到达前端时 S.working
         # 还没有这个 agent，会被渲染成空节点，之后怎么刷都找不回来（切走再切回才出现）
         self.activity[aid] = []
+        self.running[aid]["shown"] = "working"
+        self.running[aid]["last_evt"] = time.time()
         await self.broadcast({"t": "agent", "id": aid, "run": "working"})
 
         # 观察层：在每个触发本次唤醒的会话里插一条 note 占位（💭 过程卡）。
@@ -719,15 +753,18 @@ class Hub:
                     await self._on_stream_line(aid, s, result_evt)
                 await proc.wait()
 
+            # 超时从"总时长一刀切"改成"静默超时"：agent 用 Claude 自带的等待
+            # （长 sleep / 后台任务轮询）合法地跑几个小时也没事，只要还有动静；
+            # 真卡死的进程不会再出任何事件，照样会被清理（John 拍板：信任 agent 的 loop）
+            wd = asyncio.create_task(self._wake_watchdog(aid, proc, started))
             try:
-                await asyncio.wait_for(asyncio.gather(feed_stdin(), pump_stdout()),
-                                       timeout=config.WAKE_TIMEOUT)
+                await asyncio.gather(feed_stdin(), pump_stdout())
                 rc = proc.returncode
-            except asyncio.TimeoutError:
-                self._kill_tree(proc)
-                await proc.wait()
+            finally:
+                wd.cancel()
+            if self.running.get(aid, {}).get("timed_out"):
                 rc = -1
-                f.write("\n# !! 超时被杀\n")
+                f.write("\n# !! 静默超时被杀（太久没有任何输出事件）\n")
 
         # 观察层：把过程动态按段定格进各占位 note（换过段的只装自己那段；空段留空，前端不显示）
         items = self.activity.get(aid) or []
@@ -838,6 +875,9 @@ class Hub:
         """解析 claude 输出的一行 stream-json 事件。
         assistant 事件里的 text（agent 的"自言自语"）和 tool_use（读文件/改文件/跑命令）
         转成过程动态推给界面；这些只进内存，绝不进聊天记录，不污染任何人的上下文。"""
+        info = self.running.get(aid)
+        if info:
+            info["last_evt"] = time.time()  # 活性看门与"等待中"状态检测都靠它
         try:
             evt = json.loads(line)
         except (json.JSONDecodeError, ValueError):
@@ -847,12 +887,17 @@ class Hub:
             result_evt.update(evt)
             return
         if etype != "assistant":
+            # 工具结果等事件回来了：不再处于"挂起的工具调用"（长 sleep 结束等）
+            if info:
+                info.pop("tool_pending_ts", None)
             return
+        has_tool = False
         for blk in (evt.get("message") or {}).get("content") or []:
             btype = blk.get("type")
             if btype == "text" and (blk.get("text") or "").strip():
                 item = {"k": "note", "text": blk["text"].strip()[:240]}
             elif btype == "tool_use":
+                has_tool = True
                 item = {"k": "tool", "tool": blk.get("name") or "?",
                         "detail": self._tool_detail(blk.get("input") or {})}
             else:
@@ -862,6 +907,13 @@ class Hub:
             acts.append(item)
             del acts[:-80]  # 只留最近 80 条
             await self.broadcast({"t": "act", "id": aid, "item": item})
+        if info:
+            # 发起了工具调用 → 记挂起时刻（长 sleep/后台等待期间它一直挂着，
+            # 超 2 分钟界面显示 ⏳ 等待中）；纯文字思考 → 清掉
+            if has_tool:
+                info["tool_pending_ts"] = time.time()
+            else:
+                info.pop("tool_pending_ts", None)
 
     @classmethod
     def _tool_detail(cls, tool_input):

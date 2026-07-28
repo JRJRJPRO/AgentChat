@@ -33,6 +33,7 @@ body.light {
 }
 body.light .bubble { box-shadow: 0 1px 2px rgba(20,30,50,.08); }
 body.light .bubble code, body.light .bubble pre { background: rgba(20,30,50,.07); }
+body.light .md-tbl th { background: rgba(20,30,50,.07); }
 * { box-sizing: border-box; margin: 0; padding: 0; }
 html, body { height: 100%; }
 body {
@@ -190,7 +191,7 @@ body.light {
 .ctx-report { max-height: 60vh; overflow-y: auto; font-size: 13px; }
 .ctx-report h4 { margin: 10px 0 6px; font-size: 14px; }
 .ctx-report h5 { margin: 10px 0 4px; font-size: 13px; color: var(--muted); }
-.ctx-report p { margin: 4px 0; }
+.ctx-report p { margin: 4px 0; white-space: pre-wrap; }
 .ctx-report .muted { color: var(--muted); }
 .ctx-report table { border-collapse: collapse; width: 100%; margin: 4px 0 10px; }
 .ctx-report th, .ctx-report td {
@@ -232,6 +233,30 @@ body.light {
 }
 .bubble pre code { background: none; padding: 0; }
 .bubble a { color: var(--accent); }
+
+/* 气泡里的 markdown 块级元素（v3.2：表格/标题/列表/引用/分隔线） */
+.bubble p, .bubble ul, .bubble ol, .bubble blockquote, .bubble .md-tbl { margin: 8px 0; }
+.bubble > :first-child { margin-top: 0; }
+.bubble > :last-child { margin-bottom: 0; }
+.bubble h3, .bubble h4, .bubble h5, .bubble h6 { margin: 14px 0 6px; line-height: 1.4; }
+.bubble h3 { font-size: 15px; }
+.bubble h4 { font-size: 14px; }
+.bubble h5, .bubble h6 { font-size: 13px; }
+.bubble ul, .bubble ol { padding-left: 20px; white-space: normal; }
+.bubble li { margin: 3px 0; }
+.bubble li.nest { margin-left: 16px; list-style-type: circle; }
+.bubble blockquote {
+  border-left: 3px solid var(--border); padding: 2px 10px; color: var(--muted);
+}
+.bubble hr { border: none; border-top: 1px solid var(--border); margin: 10px 0; }
+.md-tbl { overflow-x: auto; white-space: normal; }
+.md-tbl table { border-collapse: collapse; font-size: 12.5px; }
+.md-tbl th, .md-tbl td { border: 1px solid var(--border); padding: 4px 9px; text-align: left; }
+.md-tbl th { background: rgba(0,0,0,.2); font-weight: 600; }
+.code-lang {
+  display: block; color: var(--muted); font-size: 11px; margin-bottom: 4px;
+  font-family: Consolas, monospace;
+}
 .msg-time { color: var(--muted); font-size: 10px; margin-top: 4px; }
 .msg-time .rcpt { color: var(--green); }  /* ✓ 已送达回执（私聊勾、群聊勾+名字） */
 .msg-row.mine .msg-time { text-align: right; }

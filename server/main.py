@@ -140,7 +140,7 @@ async def api_state():
 async def api_usage_settings(payload: dict = Body(...)):
     """设置里的两个滑杆：预警阈值 / 轮询间隔。存 db.meta，监控循环每轮现读、立即生效。"""
     if "warn_pct" in payload:
-        db.set_meta("usage_warn_pct", max(30, min(95, int(payload["warn_pct"]))))
+        db.set_meta("usage_warn_pct", max(30, min(100, int(payload["warn_pct"]))))  # 100 = 关闭预警
     if "poll_secs" in payload:
         db.set_meta("usage_poll_secs", max(60, min(900, int(payload["poll_secs"]))))
     return {"warn_pct": hub.usage_warn_pct(), "poll_secs": hub.usage_poll_secs()}

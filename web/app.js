@@ -872,6 +872,7 @@ function connectWS() {
       renderActs();
     } else if (d.t === "auth") {
       S.auth = d.needed ? d : null;
+      S.authHidden = false;  // 状态变了就重新展示（用户之前点 ✕ 收起过也一样）
       renderAuthBar();
       if (!d.needed) toast(t("auth_recovered"));
     } else if (d.t === "ask") {
@@ -890,7 +891,7 @@ function connectWS() {
       S.usageMonitor = { ...(S.usageMonitor || {}), failing: d.failing,
         fail_reason: d.reason || null, retry_at: d.retry_at || 0 };
       if (d.failing && d.reason === "rate_limited") {
-        toast(`⚠ ${usageFailText()}`);  // 限流是临时的，提示一下就好，不当大事
+        // 官方元数据接口限流是常态（和登录无关），自动退避即可；只在 ⚙ 设置的用量区如实显示，不弹提示打扰
       } else if (d.failing) {
         toast(`⚠ ${t("usage_fail_note")}`, 1);
         notify(0, "AgentChat", t("usage_fail_note"));
@@ -1432,12 +1433,15 @@ function renderUsageWarnSettings() {
   const m = S.usageMonitor || {};
   $("stWarnPct").value = m.warn_pct || 80;
   $("stPollSec").value = m.poll_secs || 180;
-  $("stWarnPctV").textContent = `${$("stWarnPct").value}%`;
+  $("stWarnPctV").textContent = warnPctText(+$("stWarnPct").value);
   $("stPollSecV").textContent = fmtPollSec(+$("stPollSec").value);
   const fail = $("stUsageFail");
   fail.classList.toggle("hidden", !m.failing);
   if (m.failing) fail.textContent = `⚠ ${usageFailText()}`;
 }
+
+// 阈值滑杆拉到 100 = 关闭预警
+function warnPctText(v) { return v >= 100 ? t("warn_off") : `${v}%`; }
 
 // 用量查询故障的说明文字：限流（临时，自动退避重试）与真失败（格式可能变了）分开讲
 function usageFailText() {
@@ -1640,7 +1644,8 @@ async function loadPendingAsks() {
 
 function renderAuthBar() {
   const bar = $("authBar");
-  if (!S.auth) return bar.classList.add("hidden");
+  if (!S.auth || S.authHidden) return bar.classList.add("hidden");
+  $("btnAuthHide").title = t("auth_hide");
   const limit = S.auth.kind === "limit";  // 订阅用量打满：会自动恢复，重试按钮只是手动兜底
   let text = `⚠ ${t(limit ? "limit_needed" : "auth_needed")}`;
   if (limit && S.auth.resets_at) {
@@ -1736,13 +1741,14 @@ function bind() {
   $("btnAuthRetry").onclick = async () => {
     try { await api("/api/auth/clear", {}); } catch (e) { toast(e.message, 1); }
   };
+  $("btnAuthHide").onclick = () => { S.authHidden = true; renderAuthBar(); };  // 收起横幅，状态一变会自动再出来
 
   // 提问浮层：收起成小徽标 / 点徽标展开
   $("askCollapse").onclick = () => { S.askCollapsed = true; renderAskOverlay(); };
   $("askBadge").onclick = () => { S.askCollapsed = false; renderAskOverlay(); };
 
   // 用量预警滑杆：拖动实时显示数值，松手保存
-  $("stWarnPct").oninput = () => { $("stWarnPctV").textContent = `${$("stWarnPct").value}%`; };
+  $("stWarnPct").oninput = () => { $("stWarnPctV").textContent = warnPctText(+$("stWarnPct").value); };
   $("stPollSec").oninput = () => { $("stPollSecV").textContent = fmtPollSec(+$("stPollSec").value); };
   $("stWarnPct").onchange = $("stPollSec").onchange = saveUsageWarnSettings;
 

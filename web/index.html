@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>AgentChat</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%232e5c46'/%3E%3Ctext x='50' y='68' font-size='52' text-anchor='middle' fill='%23e6f4ec' font-family='sans-serif'%3E%E7%BE%A4%3C/text%3E%3C/svg%3E">
-<link rel="stylesheet" href="style.css?v=32">
+<link rel="stylesheet" href="style.css?v=33">
 </head>
 <body>
 <!-- Claude 登录失效提示条（全局，检测到唤醒因鉴权失败时出现） -->
@@ -13,6 +13,7 @@
   <span id="authText"></span>
   <button id="btnAuthLogin" data-i18n="auth_login">打开登录窗口</button>
   <button id="btnAuthRetry" data-i18n="auth_retry">已登录，重试</button>
+  <button id="btnAuthHide">✕</button>
 </div>
 <div id="app">
   <!-- ============ 左侧栏 ============ -->
@@ -173,7 +174,7 @@
     <div class="sect" data-i18n="usage_warn_sect">用量预警（Session 5h）</div>
     <div class="usage-box">
       <label class="slider-row"><span data-i18n="warn_threshold">预警阈值</span>
-        <input type="range" id="stWarnPct" min="30" max="95" step="5"><b id="stWarnPctV"></b></label>
+        <input type="range" id="stWarnPct" min="30" max="100" step="5"><b id="stWarnPctV"></b></label>
       <label class="slider-row"><span data-i18n="poll_interval">查询间隔</span>
         <input type="range" id="stPollSec" min="60" max="900" step="60"><b id="stPollSecV"></b></label>
     </div>
@@ -230,6 +231,6 @@
 <button id="askBadge" class="hidden"></button>
 
 <script src="i18n.js"></script>
-<script src="app.js?v=32"></script>
+<script src="app.js?v=33"></script>
 </body>
 </html>

@@ -477,17 +477,24 @@ class Hub:
                     self.usage_failing = False
                     await self.broadcast({"t": "usage_fail", "failing": False})
                 pct = row.get("utilization") or 0
-                if pct >= self.usage_warn_pct():
+                wp = self.usage_warn_pct()
+                if pct >= wp and wp < 100:  # 阈值拉到 100 = 关闭预警
                     fresh = not self.usage_alert or self.usage_alert.get("resets_at") != row.get("resets_at")
                     if fresh:
                         self.usage_note_sent.clear()
                     self.usage_alert = {"pct": pct, "resets_at": row.get("resets_at"),
-                                        "threshold": self.usage_warn_pct()}
+                                        "threshold": wp}
                     await self.broadcast({"t": "usage_alert", "alert": self.usage_alert, "fresh": fresh})
                 elif self.usage_alert:  # 窗口重置回落 / 用户调高了阈值
                     self.usage_alert = None
                     self.usage_note_sent.clear()
                     await self.broadcast({"t": "usage_alert", "alert": None})
+            # 预警还挂着但重置点已过（接口被限流拿不到新数据时会这样）→ 按钟表时间撤警，
+            # 别拿上个窗口的旧数字一直喊"用量告急"（John 2026-08-02 实遇）
+            if self.usage_alert and self._reset_passed(self.usage_alert.get("resets_at"), grace=60):
+                self.usage_alert = None
+                self.usage_note_sent.clear()
+                await self.broadcast({"t": "usage_alert", "alert": None})
             await self._limit_watch(row if data_fresh else None)
             # 用量挂起期间盯得勤一点（最多 2 分钟一查），重置后能尽快自动恢复
             secs = max(60, self.usage_poll_secs())
@@ -516,8 +523,25 @@ class Hub:
                     return await self._lift_limit("Session 用量窗口已重置")
                 if pct < 90:
                     return await self._lift_limit("Session 用量已回落")
+        if lim and self._reset_passed(lim.get("resets_at"), grace=600):
+            return await self._lift_limit("Session 重置时间已过")  # 接口被限流查不到时也能按钟表恢复
         if lim and time.time() - lim["ts"] > 5 * 3600 + 600:
             await self._lift_limit("用量挂起已超过一个 Session 窗口，按时间兜底解除")
+
+    @staticmethod
+    def _reset_passed(iso, grace=0):
+        """resets_at（ISO UTC 字符串）是否已过去 grace 秒以上。
+        用量元数据接口被限流拿不到新数据时，靠钟表时间兜底判断窗口已重置。"""
+        if not iso:
+            return False
+        try:
+            from datetime import datetime, timezone
+            ts = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            return time.time() > ts.timestamp() + grace
+        except ValueError:
+            return False
 
     async def _lift_limit(self, reason):
         """解除用量挂起：清失败计数、平反挂起前后被误暂停的 agent、补送积压消息。"""

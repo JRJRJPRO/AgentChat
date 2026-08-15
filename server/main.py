@@ -78,7 +78,7 @@ def agent_view(a):
         "memories": [m for m in (a.get("memories") or "").split(",") if m],
         "ask_perm": bool(a.get("ask_perm")), "run": hub.run_state(a["id"]),
         "ctx_tokens": a.get("ctx_tokens") or 0, "ctx_window": a.get("ctx_window") or 0,
-        "ctx_at": a.get("ctx_at") or 0,
+        "ctx_at": a.get("ctx_at") or 0, "email": a.get("email") or "",
     }
 
 
@@ -218,6 +218,8 @@ async def api_update_agent(aid: int, payload: dict = Body(...)):
         kw["permission"] = payload["permission"]
     if "memo" in payload:
         kw["memo"] = payload["memo"] or ""
+    if "email" in payload:
+        kw["email"] = (payload["email"] or "").strip()[:200]
     if payload.get("cwd"):
         kw["cwd"] = payload["cwd"]
     if "extra_dirs" in payload:

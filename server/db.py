@@ -131,6 +131,9 @@ def _migrate():
     if "ctx_at" not in cols:
         # ctx_tokens 的统计时刻（唤醒结束/压缩后探测/📊 查询），界面显示"这个数是什么时候量的"
         _exec("ALTER TABLE agents ADD COLUMN ctx_at REAL NOT NULL DEFAULT 0")
+    if "email" not in cols:
+        # 可选的联系方式/邮箱，纯展示元数据（详情卡里可查看/编辑）
+        _exec("ALTER TABLE agents ADD COLUMN email TEXT NOT NULL DEFAULT ''")
     mcols = {r["name"] for r in _rows("PRAGMA table_info(messages)")}
     if "attachments" not in mcols:
         # 附件（图片/临时文档）存 JSON 数组：[{kind,name,path,url,size}, ...]

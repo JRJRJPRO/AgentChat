@@ -186,11 +186,13 @@ function avatarColor(name) {
   for (const ch of name) h = (h * 31 + ch.codePointAt(0)) >>> 0;
   return AVATAR_COLORS[h % AVATAR_COLORS.length];
 }
-function avatarHtml(name, isUser, extraCls, dotCls) {
+function avatarHtml(name, isUser, extraCls, dotCls, aid) {
   const color = isUser ? "var(--bubble-me)" : avatarColor(name || "?");
   const ch = isUser ? t("me") : (name || "?").slice(0, 1);
   const dot = dotCls ? `<span class="dot ${dotCls}"></span>` : "";
-  return `<div class="avatar ${extraCls || ""}" style="background:${color}">${esc(ch)}${dot}</div>`;
+  // aid 存在 = 这是某个 agent 的头像，挂 data-aid 让悬浮/点击弹详情卡
+  const tag = aid ? ` data-aid="${aid}" class="avatar pop ${extraCls || ""}"` : ` class="avatar ${extraCls || ""}"`;
+  return `<div${tag} style="background:${color}">${esc(ch)}${dot}</div>`;
 }
 
 function agentById(id) { return S.agents.find((a) => a.id === id); }
@@ -264,8 +266,10 @@ function renderAgentList() {
     root.innerHTML = `<div class="list-empty">${esc(t("empty_agents"))}</div>`;
     return;
   }
+  // 归档的沉底；其余按最近唤醒时间倒序（刚叫过的浮到最上面，好找），从未唤醒的按 id
   const ordered = [...S.agents].sort((x, y) =>
-    (x.status === "archived" ? 1 : 0) - (y.status === "archived" ? 1 : 0));
+    (x.status === "archived" ? 1 : 0) - (y.status === "archived" ? 1 : 0) ||
+    (y.last_wake_at || 0) - (x.last_wake_at || 0) || x.id - y.id);
   for (const a of ordered) {
     const card = document.createElement("div");
     card.className = "agent-card" + (a.status === "archived" ? " archived" : "");
@@ -275,8 +279,8 @@ function renderAgentList() {
       : S.waiting.has(a.id) ? `⏳ ${t("waiting")}`
       : S.working.has(a.id) ? t("working") : t(a.status === "active" ? "online" : a.status);
     const av = a.status === "archived"
-      ? avatarHtml(a.name, false, "round archived", "")
-      : avatarHtml(a.name, false, "round", agentDot(a));
+      ? avatarHtml(a.name, false, "round archived", "", a.id)
+      : avatarHtml(a.name, false, "round", agentDot(a), a.id);
     card.innerHTML =
       `<div class="row1">${av}` +
       `<div style="flex:1;min-width:0"><div class="a-name">${esc(a.name)}</div>` +
@@ -313,6 +317,91 @@ function renderAgentList() {
 async function setAgentStatus(aid, status) {
   await api(`/api/agents/${aid}/status`, { status }).catch((e) => toast(e.message, 1));
   await refreshLists();
+}
+
+// ---------------- agent 详情悬浮卡（头像悬浮/点击弹出） ----------------
+
+let popAid = 0, popPinned = false, popTimer = null;
+
+function agentRunText(a) {
+  return S.compacting.has(a.id) ? t("compacting")
+    : S.probing.has(a.id) ? t("probing")
+    : S.waiting.has(a.id) ? `⏳ ${t("waiting")}`
+    : S.working.has(a.id) ? t("working")
+    : t(a.status === "active" ? "online" : a.status);
+}
+
+function agentPopHtml(a) {
+  const row = (label, val) => val ? `<div class="ap-row"><span>${esc(label)}</span><b>${esc(val)}</b></div>` : "";
+  const av = avatarHtml(a.name, false, "round" + (a.status === "archived" ? " archived" : ""), agentDot(a));
+  const last = a.last_wake_at ? fmtTime(a.last_wake_at) : t("never");
+  const ct = ctxText(a);
+  return `<div class="ap-head">${av}<div class="ap-hi"><div class="ap-name">${esc(a.name)}</div>` +
+    `<div class="ap-st">${esc(agentRunText(a))}</div></div></div>` +
+    `<div class="ap-body">` +
+    row(t("f_model"), a.model) +
+    row(t("f_perm"), t("perm_name_" + a.permission)) +
+    row(t("last_wake"), `${last} · ${a.wake_count}${t("wakes")}`) +
+    (ct ? row(t("ctx_label"), ct) : "") +
+    row(t("f_email"), a.email) +
+    row(t("f_memo"), a.memo) +
+    `<div class="ap-cwd" title="${esc(a.cwd)}">${esc(a.cwd)}</div>` +
+    `</div><div class="ap-btns">` +
+    `<button class="mini-btn" data-ap="dm">${esc(t("dm"))}</button>` +
+    `<button class="mini-btn" data-ap="edit">${esc(t("detail_edit"))}</button>` +
+    `</div>`;
+}
+
+function showAgentPop(aid, anchor, pinned) {
+  const a = agentById(aid);
+  if (!a) return;
+  popAid = aid; popPinned = pinned || popPinned;
+  const pop = $("agentPop");
+  pop.innerHTML = agentPopHtml(a);
+  pop.classList.remove("hidden");
+  pop.querySelector('[data-ap="edit"]').onclick = () => { hideAgentPop(true); openAgentEdit(a); };
+  pop.querySelector('[data-ap="dm"]').onclick = async () => {
+    hideAgentPop(true);
+    const r = await api(`/api/agents/${aid}/dm`, {});
+    await refreshLists(); openConv(r.conv_id); setTab("chats");
+  };
+  // 定位：优先贴头像右下，超出视口就翻到左侧/上方
+  const r = anchor.getBoundingClientRect();
+  const pw = pop.offsetWidth, ph = pop.offsetHeight, gap = 8;
+  let left = r.right + gap, top = r.top;
+  if (left + pw > window.innerWidth - 8) left = Math.max(8, r.left - pw - gap);
+  if (top + ph > window.innerHeight - 8) top = Math.max(8, window.innerHeight - ph - 8);
+  pop.style.left = left + "px";
+  pop.style.top = top + "px";
+}
+
+function hideAgentPop(force) {
+  if (popPinned && !force) return;
+  popPinned = false; popAid = 0;
+  $("agentPop").classList.add("hidden");
+}
+
+// 全局委托：悬浮/点击带 data-aid 的头像弹卡；卡片自身不触发隐藏
+function initAgentPop() {
+  const pop = $("agentPop");
+  document.addEventListener("mouseover", (e) => {
+    const av = e.target.closest("[data-aid]");
+    if (av) {
+      const aid = +av.dataset.aid;
+      clearTimeout(popTimer);
+      if (!popPinned || popAid === aid) popTimer = setTimeout(() => showAgentPop(aid, av, false), 220);
+    } else if (!e.target.closest("#agentPop")) {
+      clearTimeout(popTimer);
+      if (!popPinned) popTimer = setTimeout(() => hideAgentPop(false), 250);
+    }
+  });
+  pop.addEventListener("mouseenter", () => clearTimeout(popTimer));
+  pop.addEventListener("mouseleave", () => { if (!popPinned) hideAgentPop(false); });
+  document.addEventListener("click", (e) => {
+    const av = e.target.closest("[data-aid]");
+    if (av) { e.stopPropagation(); showAgentPop(+av.dataset.aid, av, true); }
+    else if (!e.target.closest("#agentPop")) hideAgentPop(true);
+  });
 }
 
 // ---------------- 会话打开与消息 ----------------
@@ -382,6 +471,11 @@ function dmAgent(c) {
 
 function renderChatHead() {
   const c = S.cur;
+  const ha = dmAgent(c);  // 私聊头部头像挂 data-aid，悬浮/点击弹详情卡
+  $("chatHeadAv").innerHTML = c.type === "dm"
+    ? (ha ? avatarHtml(ha.name, false, "small round" + (ha.status === "archived" ? " archived" : ""), agentDot(ha), ha.id)
+          : avatarHtml(c.display_name, false, "small round", ""))
+    : avatarHtml(c.display_name, false, "small", "");
   $("chatTitle").textContent = c.display_name;
   let sub = c.members.map((m) => (m.mtype === "user" ? t("me") : m.name)).join("、");
   const a = dmAgent(c);
@@ -516,7 +610,7 @@ function msgHtml(m) {
   const showName = !mine && S.cur.type === "group";
   return (
     `<div class="msg-row ${mine ? "mine" : ""}" data-mid="${m.id}">` +
-    avatarHtml(mine ? "" : m.sender, mine, "small round", a ? "" : "") +
+    avatarHtml(mine ? "" : m.sender, mine, "small round", "", a ? a.id : 0) +
     `<div class="msg-body">` +
     (showName ? `<div class="msg-sender">${esc(m.sender)}</div>` : "") +
     `<div class="bubble">${mdRender(m.content)}${attsHtml(m.attachments)}</div>` +
@@ -1084,6 +1178,7 @@ function openAgentEdit(a) {
   fillSelect($("aeModel"), S.models, a.model);
   fillSelect($("aePerm"), S.permissions, a.permission);
   $("aeMemo").value = a.memo || "";
+  $("aeEmail").value = a.email || "";
   $("aeDirs").value = a.extra_dirs || "";
   $("aeAsk").checked = !!a.ask_perm;
   $("aePermHint").textContent = t("perm_" + a.permission);
@@ -1101,6 +1196,7 @@ async function saveAgentEdit() {
       model: $("aeModel").value,
       permission: $("aePerm").value,
       memo: $("aeMemo").value,
+      email: $("aeEmail").value,
       extra_dirs: $("aeDirs").value,
       ask_perm: $("aeAsk").checked,
       skills: checkedSkills("aeSkills"),
@@ -1154,7 +1250,7 @@ function openConvInfo() {
     const isUser = m.mtype === "user";
     const a = isUser ? null : agentById(m.mid);
     line.innerHTML =
-      avatarHtml(isUser ? "" : m.name, isUser, "small round", a ? agentDot(a) : "") +
+      avatarHtml(isUser ? "" : m.name, isUser, "small round", a ? agentDot(a) : "", a ? a.id : 0) +
       `<span class="m-name">${esc(isUser ? t("me") : m.name)}</span>`;
     if (!isUser && c.type === "group") {
       const rm = document.createElement("button");
@@ -1866,6 +1962,7 @@ function bind() {
   document.body.classList.toggle("light", S.theme === "light");
   applyI18n();
   bind();
+  initAgentPop();
   await refreshLists();
   connectWS();
 })();

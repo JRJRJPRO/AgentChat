@@ -94,6 +94,8 @@ body {
 .avatar.small { width: 30px; height: 30px; min-width: 30px; border-radius: 8px; font-size: 13px; }
 /* 人（agent/用户/私聊）= 圆形；群聊保持圆角方形，一眼区分 */
 .avatar.round { border-radius: 50%; }
+.avatar.pop { cursor: pointer; }
+.avatar.pop:hover { outline: 2px solid var(--accent); outline-offset: 1px; }
 /* 已归档：灰度头像 */
 .avatar.archived { filter: grayscale(1); opacity: .55; }
 .agent-card.archived .a-name, .agent-card.archived .a-sub { color: var(--muted); }
@@ -263,6 +265,27 @@ body.light {
 
 .sys-msg { text-align: center; color: var(--muted); font-size: 12px; margin: 12px 0; }
 .sys-msg.error { color: var(--red); }
+
+/* agent 详情悬浮卡（v3.4） */
+#agentPop {
+  position: fixed; z-index: 400; width: 260px; max-width: 86vw;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+  padding: 12px 14px; box-shadow: 0 12px 34px rgba(0,0,0,.5); font-size: 13px;
+}
+#agentPop .ap-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+#agentPop .ap-hi { min-width: 0; }
+#agentPop .ap-name { font-weight: 700; font-size: 14px; }
+#agentPop .ap-st { color: var(--muted); font-size: 12px; margin-top: 1px; }
+#agentPop .ap-body { display: flex; flex-direction: column; gap: 5px; }
+#agentPop .ap-row { display: flex; justify-content: space-between; gap: 12px; }
+#agentPop .ap-row > span { color: var(--muted); white-space: nowrap; }
+#agentPop .ap-row > b { min-width: 0; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#agentPop .ap-cwd {
+  color: var(--muted); font-size: 11px; font-family: Consolas, monospace;
+  margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left;
+}
+#agentPop .ap-btns { display: flex; gap: 8px; margin-top: 12px; }
+#agentPop .ap-btns .mini-btn { flex: 1; }
 
 .day-divider {
   display: flex; align-items: center; gap: 12px; margin: 18px 0 14px;

@@ -100,7 +100,7 @@ class Hub:
         self._kill_tree(info["proc"])
         return True
 
-    def _agent_env(self):
+    def _agent_env(self, agent=None):
         env = dict(os.environ)
         for k in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT"):
             env.pop(k, None)
@@ -108,6 +108,10 @@ class Hub:
         env["MCP_TOOL_TIMEOUT"] = "660000"  # ask_permission 要等用户，别被默认超时掐断
         if self.git_bash:
             env["CLAUDE_CODE_GIT_BASH_PATH"] = self.git_bash
+        # 第三方 Anthropic 兼容模型（data/providers.json）：注入端点+令牌，
+        # 只作用于这个子进程，env 令牌优先于 claude.ai 登录态（实测）
+        if agent:
+            env.update(config.PROVIDER_ENV.get(agent["model"], {}))
         return env
 
     @staticmethod
@@ -160,7 +164,7 @@ class Hub:
             ]
             with open(log_path, "w", encoding="utf-8", errors="replace") as f:
                 proc = await asyncio.create_subprocess_exec(
-                    *cmd, cwd=agent["cwd"], env=self._agent_env(),
+                    *cmd, cwd=agent["cwd"], env=self._agent_env(agent),
                     stdin=asyncio.subprocess.PIPE, stdout=f, stderr=f)
                 self.running[aid]["proc"] = proc
                 try:
@@ -208,7 +212,7 @@ class Hub:
             "--resume", agent["session_id"],
         ]
         proc = await asyncio.create_subprocess_exec(
-            *cmd, cwd=agent["cwd"], env=self._agent_env(),
+            *cmd, cwd=agent["cwd"], env=self._agent_env(agent),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         info = self.running.get(agent["id"])
@@ -743,7 +747,7 @@ class Hub:
         os.makedirs(agent["cwd"], exist_ok=True)
         memories.ensure_claude_md(agent)
         log_path = os.path.join(config.LOG_DIR, f"agent{aid}_{int(time.time())}.log")
-        env = self._agent_env()
+        env = self._agent_env(agent)
 
         started = time.time()
         result_evt = {}

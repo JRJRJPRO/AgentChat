@@ -1,4 +1,5 @@
 """全局配置：路径、端口、默认参数、权限预设。"""
+import json
 import os
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -30,6 +31,33 @@ MODEL_IDS = {
     "opus": "claude-opus-4-8",
     "haiku": "claude-haiku-4-5-20251001",
 }
+
+# 第三方 Anthropic 兼容模型（如蚂蚁 Ling）：配置放 data/providers.json（gitignore，
+# 令牌不入库）。每个条目自动追加进 MODELS/MODEL_IDS，唤醒该模型的 agent 时给
+# claude 子进程注入 ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN，请求就走对应端点，
+# 不动全局登录态。格式（键 = 模型下拉里显示的短名）：
+#   { "ling": { "model_id": "Ling-3.0-flash",
+#               "base_url": "https://api.ant-ling.com/anthropic",
+#               "auth_token": "sk-..." } }
+PROVIDERS_FILE = os.path.join(DATA_DIR, "providers.json")
+PROVIDER_ENV = {}   # 模型短名 -> 要注入的环境变量 dict
+try:
+    with open(PROVIDERS_FILE, encoding="utf-8") as _f:
+        for _key, _p in (json.load(_f) or {}).items():
+            if not (_p.get("model_id") and _p.get("base_url") and _p.get("auth_token")):
+                continue
+            if _key not in MODELS:
+                MODELS.append(_key)
+            MODEL_IDS[_key] = _p["model_id"]
+            PROVIDER_ENV[_key] = {
+                "ANTHROPIC_BASE_URL": _p["base_url"],
+                "ANTHROPIC_AUTH_TOKEN": _p["auth_token"],
+                # 后台小任务（标题生成等）也得用该端点有的模型，别去找 haiku
+                "ANTHROPIC_SMALL_FAST_MODEL": _p.get("small_fast_model", _p["model_id"]),
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL": _p.get("small_fast_model", _p["model_id"]),
+            }
+except (OSError, ValueError):
+    pass  # 没有该文件/格式坏了 → 只有官方模型可选，不挡启动
 
 DEFAULT_CHAIN_LIMIT = 12    # 用户不发话时，一个会话里 agent 最多累计连发多少条（防互聊刷额度）
 WAKE_DEBOUNCE = 1.5         # 收到新消息后等这么久再唤醒，把连发的消息攒成一批（秒）

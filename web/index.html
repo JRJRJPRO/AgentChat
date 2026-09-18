@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>AgentChat</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%232e5c46'/%3E%3Ctext x='50' y='68' font-size='52' text-anchor='middle' fill='%23e6f4ec' font-family='sans-serif'%3E%E7%BE%A4%3C/text%3E%3C/svg%3E">
-<link rel="stylesheet" href="style.css?v=34">
+<link rel="stylesheet" href="style.css?v=35">
 </head>
 <body>
 <!-- Claude 登录失效提示条（全局，检测到唤醒因鉴权失败时出现） -->
@@ -70,7 +70,7 @@
       <div id="composer">
         <button id="btnAttach" class="icon-btn" title="添加图片/文件">📎</button>
         <input type="file" id="fileInput" multiple class="hidden">
-        <textarea id="input" rows="1" data-i18n-ph="input_ph" placeholder="输入消息，Enter 发送，Shift+Enter 换行"></textarea>
+        <textarea id="input" rows="1" data-i18n-ph="input_ph" placeholder="输入消息，Enter 发送，Ctrl+Enter 换行"></textarea>
         <button id="btnSend" data-i18n="send">发送</button>
       </div>
       <div id="dropHint" class="hidden"><span data-i18n="drop_hint">松开以添加附件</span></div>
@@ -235,7 +235,17 @@
 <!-- agent 详情悬浮卡：悬浮/点击任意 agent 头像弹出，可点「编辑」进完整设置 -->
 <div id="agentPop" class="hidden"></div>
 
-<script src="i18n.js"></script>
-<script src="app.js?v=34"></script>
+<!-- 前端按域拆分为经典脚本（共享全局作用域）：core 必须最先、main 必须最后 -->
+<script src="i18n.js?v=35"></script>
+<script src="js/core.js?v=35"></script>
+<script src="js/md.js?v=35"></script>
+<script src="js/lists.js?v=35"></script>
+<script src="js/chat.js?v=35"></script>
+<script src="js/agents.js?v=35"></script>
+<script src="js/library.js?v=35"></script>
+<script src="js/settings.js?v=35"></script>
+<script src="js/cards.js?v=35"></script>
+<script src="js/ws.js?v=35"></script>
+<script src="js/main.js?v=35"></script>
 </body>
 </html>
